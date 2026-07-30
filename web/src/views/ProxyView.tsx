@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
-import { AlertTriangle, Check, CheckCircle2, Network, Plus, Route, Trash2, Waypoints } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, Download, Network, Plus, Route, Trash2, Waypoints } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,7 @@ import type { ProxyDraft, ProxyNode } from "../types";
 import { MeterBar } from "../components/MeterBar";
 import { ResultStrip } from "../components/ResultStrip";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Modal } from "../components/Modal";
 
 const proxyModes = [
   { value: "direct", label: "直连", description: "所有请求不使用代理池" },
@@ -31,9 +32,12 @@ const stateBadge = (proxy: ProxyNode): { label: string; variant: "muted" | "warn
 };
 
 export function ProxyView({ data }: { data: ConsoleData }) {
-  const { proxies, settings, busy, createProxy, toggleProxy, testProxy, deleteProxy, updateSettings } = data;
+  const { proxies, settings, busy, createProxy, importProxies, toggleProxy, testProxy, deleteProxy, clearProxies, updateSettings } = data;
   const [draft, setDraft] = useState<ProxyDraft>({ name: "香港节点 1", type: "http", url: "", dailyRequestLimit: 1000, maxConcurrency: 10 });
   const [deleteTarget, setDeleteTarget] = useState<ProxyNode | null>(null);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
 
   const proxyMode = settings?.proxyMode ?? "optional";
   const preProxyEnabled = Boolean(settings?.outboundPreProxyEnabled);
@@ -162,7 +166,23 @@ export function ProxyView({ data }: { data: ConsoleData }) {
       </Card>
 
       <Card className="p-5">
-        <h2 className="text-sm font-semibold">新增代理节点</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold">新增代理节点</h2>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              disabled={busy || proxies.length === 0}
+              onClick={() => setClearConfirmOpen(true)}
+            >
+              <Trash2 size={16} /> 一键清空
+            </Button>
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => setImportOpen(true)}>
+              <Download size={16} /> 批量导入
+            </Button>
+          </div>
+        </div>
         <div className="mt-4 flex flex-wrap items-end gap-2">
           <div className="w-36 space-y-1.5">
             <Label className="text-xs text-muted-foreground">名称</Label>
@@ -324,6 +344,54 @@ export function ProxyView({ data }: { data: ConsoleData }) {
           setDeleteTarget(null);
         }}
       />
+
+      <ConfirmDialog
+        open={clearConfirmOpen}
+        title="清空代理池"
+        message={`确定删除全部 ${proxies.length} 个代理节点吗？此操作无法撤销。`}
+        confirmText="全部删除"
+        busy={busy}
+        onCancel={() => setClearConfirmOpen(false)}
+        onConfirm={async () => {
+          const cleared = await clearProxies();
+          if (cleared) setClearConfirmOpen(false);
+        }}
+      />
+
+      <Modal
+        open={importOpen}
+        title="批量导入代理"
+        icon={<Download size={18} className="text-primary" />}
+        onClose={() => setImportOpen(false)}
+        footer={
+          <>
+            <Button variant="ghost" disabled={busy} onClick={() => setImportOpen(false)}>取消</Button>
+            <Button
+              disabled={busy || !importText.trim()}
+              onClick={async () => {
+                const imported = await importProxies(importText);
+                if (!imported) return;
+                setImportText("");
+                setImportOpen(false);
+              }}
+            >
+              {busy ? "导入中…" : "确认导入"}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-xs text-muted-foreground">
+          每行填写一个代理地址，支持 http://、https://、socks:// 和 socks5://；省略协议时按 HTTP 导入。重复地址会自动跳过。
+        </p>
+        <textarea
+          className="min-h-56 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          value={importText}
+          disabled={busy}
+          onChange={(event) => setImportText(event.target.value)}
+          placeholder={"http://user:pass@1.2.3.4:8080\nsocks5://127.0.0.1:1080"}
+        />
+        <p className="text-xs text-muted-foreground">共 {importText.split(/\r?\n/).filter((line) => line.trim()).length} 个地址，单次最多 1000 个。</p>
+      </Modal>
     </div>
   );
 }

@@ -139,12 +139,14 @@ export function useConsoleData() {
         await fn();
         if (opts.refresh !== false) await loadPublic(token);
         if (opts.successText) pushToast(opts.successText, "success");
+        return true;
       } catch (err) {
         if (err instanceof ApiFetchError && err.status === 401) {
           logout("登录状态已失效，请重新登录");
         } else {
           pushToast(err instanceof Error ? err.message : "操作失败", "error");
         }
+        return false;
       } finally {
         setBusy(false);
       }
@@ -244,6 +246,17 @@ export function useConsoleData() {
   const createProxy = (draft: ProxyDraft) =>
     run(() => apiFetch("/admin/proxies", token, { method: "POST", body: JSON.stringify({ ...draft, type: draft.type as ProxyNode["type"] }) }).then(() => undefined), { successText: "代理节点已创建" });
 
+  const importProxies = (addresses: string) =>
+    run(
+      async () => {
+        const result = await apiFetch<{ data: { created: ProxyNode[]; skipped: string[] } }>("/admin/proxies/import", token, {
+          method: "POST",
+          body: JSON.stringify({ addresses }),
+        });
+        pushToast(`已导入 ${result.data.created.length} 个代理${result.data.skipped.length ? `，跳过 ${result.data.skipped.length} 个重复地址` : ""}`, "success");
+      },
+    );
+
   const toggleProxy = (proxy: ProxyNode) =>
     run(() => apiFetch(`/admin/proxies/${proxy.id}`, token, { method: "PATCH", body: JSON.stringify({ enabled: !proxy.enabled }) }).then(() => undefined));
 
@@ -252,6 +265,14 @@ export function useConsoleData() {
 
   const deleteProxy = (proxy: ProxyNode) =>
     run(() => apiFetch(`/admin/proxies/${proxy.id}`, token, { method: "DELETE" }).then(() => undefined), { successText: `已删除代理「${proxy.name}」` });
+
+  const clearProxies = () =>
+    run(
+      async () => {
+        const result = await apiFetch<{ data: { deleted: number } }>("/admin/proxies", token, { method: "DELETE" });
+        pushToast(`已清空 ${result.data.deleted} 个代理节点`, "success");
+      },
+    );
 
   const refresh = () => run(async () => undefined, { successText: "已刷新数据" });
 
@@ -292,9 +313,11 @@ export function useConsoleData() {
     toggleReasoningTag,
     updateSettings,
     createProxy,
+    importProxies,
     toggleProxy,
     testProxy,
     deleteProxy,
+    clearProxies,
     refresh,
   };
 }

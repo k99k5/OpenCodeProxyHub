@@ -22,6 +22,10 @@ interface UpdateKeyBody {
   policy?: ApiKeyPolicy;
 }
 
+interface ImportProxiesBody {
+  addresses?: string;
+}
+
 export const registerAdminRoutes = async (
   app: FastifyInstance,
   config: AppConfig,
@@ -163,6 +167,23 @@ export const registerAdminRoutes = async (
     }
   });
 
+  app.post<{ Body: ImportProxiesBody }>("/admin/proxies/import", async (request, reply) => {
+    try {
+      const addresses = request.body?.addresses;
+      if (typeof addresses !== "string") throw new Error("addresses must be a string");
+      const lines = addresses.split(/\r?\n/);
+      if (!lines.some((line) => line.trim())) throw new Error("At least one proxy address is required");
+      if (lines.length > 1000) throw new Error("A maximum of 1000 proxy addresses can be imported at once");
+      const result = proxyPool.import(lines);
+      audit(request, "proxy.import", "success", { created: result.created.length, skipped: result.skipped.length });
+      return reply.code(201).send({ data: result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to import proxies";
+      audit(request, "proxy.import", "failure", { error: message });
+      return reply.code(400).send({ error: { message } });
+    }
+  });
+
   app.patch<{ Params: { id: string }; Body: ProxyInput }>("/admin/proxies/:id", async (request, reply) => {
     try {
       const proxy = proxyPool.update(request.params.id, request.body || {});
@@ -174,6 +195,12 @@ export const registerAdminRoutes = async (
       audit(request, "proxy.update", "failure", { targetId: request.params.id, error: message });
       return reply.code(status).send({ error: { message } });
     }
+  });
+
+  app.delete("/admin/proxies", async (request, reply) => {
+    const deleted = proxyPool.clear();
+    audit(request, "proxy.clear", "success", { deleted });
+    return reply.send({ data: { deleted } });
   });
 
   app.delete<{ Params: { id: string } }>("/admin/proxies/:id", async (request, reply) => {
