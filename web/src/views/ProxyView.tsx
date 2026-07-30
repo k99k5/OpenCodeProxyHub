@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { AlertTriangle, Check, CheckCircle2, Download, Network, Plus, Route, Trash2, Waypoints } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -31,13 +31,36 @@ const stateBadge = (proxy: ProxyNode): { label: string; variant: "muted" | "warn
   return { label: "健康", variant: "success" };
 };
 
+const VIRTUAL_ROW_HEIGHT = 390;
+const VIRTUAL_OVERSCAN = 3;
+
 export function ProxyView({ data }: { data: ConsoleData }) {
-  const { proxies, settings, busy, createProxy, importProxies, toggleProxy, testProxy, deleteProxy, clearProxies, updateSettings } = data;
+  const { proxies, proxyPagination, settings, busy, createProxy, importProxies, toggleProxy, testProxy, deleteProxy, clearProxies, setProxyPage, updateSettings } = data;
   const [draft, setDraft] = useState<ProxyDraft>({ name: "香港节点 1", type: "http", url: "", dailyRequestLimit: 1000, maxConcurrency: 10 });
   const [deleteTarget, setDeleteTarget] = useState<ProxyNode | null>(null);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [listHeight, setListHeight] = useState(720);
+  const [listWidth, setListWidth] = useState(0);
+
+  useEffect(() => {
+    const element = listRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => {
+      setListHeight(element.clientHeight);
+      setListWidth(element.clientWidth);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: 0 });
+    setScrollTop(0);
+  }, [proxyPagination.page]);
 
   const proxyMode = settings?.proxyMode ?? "optional";
   const preProxyEnabled = Boolean(settings?.outboundPreProxyEnabled);
@@ -58,6 +81,13 @@ export function ProxyView({ data }: { data: ConsoleData }) {
         .sort((a, b) => b.weight - a.weight)[0] || null
     );
   }, [proxies]);
+
+  const columnCount = listWidth >= 1024 ? 2 : 1;
+  const totalRows = Math.ceil(proxies.length / columnCount);
+  const firstRow = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
+  const visibleRows = Math.ceil(listHeight / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+  const lastRow = Math.min(totalRows, firstRow + visibleRows);
+  const visibleProxies = proxies.slice(firstRow * columnCount, lastRow * columnCount);
 
   return (
     <div className="space-y-4">
@@ -173,7 +203,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
               variant="ghost"
               size="sm"
               className="text-destructive hover:text-destructive"
-              disabled={busy || proxies.length === 0}
+              disabled={busy || proxyPagination.total === 0}
               onClick={() => setClearConfirmOpen(true)}
             >
               <Trash2 size={16} /> 一键清空
@@ -243,18 +273,30 @@ export function ProxyView({ data }: { data: ConsoleData }) {
         </Card>
       )}
 
-      <motion.div
-        variants={staggerContainer}
-        initial="hidden"
-        animate="show"
-        className="grid grid-cols-1 gap-4 lg:grid-cols-2"
-      >
-        {proxies.map((proxy) => {
+      {proxies.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>共 {proxyPagination.total} 个节点 · 第 {proxyPagination.page}/{proxyPagination.totalPages} 页 · 每页 {proxyPagination.pageSize}</span>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" disabled={busy || proxyPagination.page <= 1} onClick={() => setProxyPage(proxyPagination.page - 1)}>上一页</Button>
+              <Button variant="outline" size="sm" disabled={busy || proxyPagination.page >= proxyPagination.totalPages} onClick={() => setProxyPage(proxyPagination.page + 1)}>下一页</Button>
+            </div>
+          </div>
+          <div ref={listRef} className="oph-scroll h-[75vh] min-h-[480px] overflow-auto rounded-lg" onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
+            <div className="relative" style={{ height: totalRows * VIRTUAL_ROW_HEIGHT }}>
+              <motion.div
+                variants={staggerContainer}
+                initial="hidden"
+                animate="show"
+                className="absolute left-0 right-0 grid grid-cols-1 gap-4 lg:grid-cols-2"
+                style={{ transform: `translateY(${firstRow * VIRTUAL_ROW_HEIGHT}px)` }}
+              >
+        {visibleProxies.map((proxy) => {
           const badge = stateBadge(proxy);
           const isPrimary = prioritized?.id === proxy.id;
           return (
-            <motion.div key={proxy.id} variants={fadeUp} layout>
-              <Card className={cn("h-full p-4", isPrimary && "ring-2 ring-primary/40")}>
+            <motion.div key={proxy.id} variants={fadeUp} className="h-[374px]">
+              <Card className={cn("h-full overflow-hidden p-4", isPrimary && "ring-2 ring-primary/40")}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -330,7 +372,11 @@ export function ProxyView({ data }: { data: ConsoleData }) {
             </motion.div>
           );
         })}
-      </motion.div>
+              </motion.div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}
@@ -348,7 +394,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
       <ConfirmDialog
         open={clearConfirmOpen}
         title="清空代理池"
-        message={`确定删除全部 ${proxies.length} 个代理节点吗？此操作无法撤销。`}
+        message={`确定删除全部 ${proxyPagination.total} 个代理节点吗？此操作无法撤销。`}
         confirmText="全部删除"
         busy={busy}
         onCancel={() => setClearConfirmOpen(false)}
