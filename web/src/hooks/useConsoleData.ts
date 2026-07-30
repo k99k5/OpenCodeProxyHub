@@ -20,6 +20,15 @@ export interface ToastMessage {
   text: string;
 }
 
+export interface ProxyPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+const PROXY_PAGE_SIZE = 3000;
+
 let toastSeq = 0;
 
 export function useConsoleData() {
@@ -33,6 +42,7 @@ export function useConsoleData() {
   const [models, setModels] = useState<ModelItem[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [proxies, setProxies] = useState<ProxyNode[]>([]);
+  const [proxyPagination, setProxyPagination] = useState<ProxyPagination>({ page: 1, pageSize: PROXY_PAGE_SIZE, total: 0, totalPages: 1 });
   const [runtime, setRuntime] = useState<RuntimePayload | null>(null);
   const [metricsData, setMetricsData] = useState<MetricsPayload | null>(null);
 
@@ -57,6 +67,7 @@ export function useConsoleData() {
     setApiKeys([]);
     setSettings(null);
     setProxies([]);
+    setProxyPagination({ page: 1, pageSize: PROXY_PAGE_SIZE, total: 0, totalPages: 1 });
     setRuntime(null);
     setMetricsData(null);
     pushToast(message, "info");
@@ -76,7 +87,7 @@ export function useConsoleData() {
         apiFetch<{ data: ApiKeyItem[] }>("/admin/api-keys", activeToken),
         apiFetch<{ data: ModelItem[] }>("/admin/models", activeToken),
         apiFetch<{ data: SystemSettings }>("/admin/settings", activeToken),
-        apiFetch<{ data: ProxyNode[] }>("/admin/proxies", activeToken),
+        apiFetch<{ data: ProxyNode[]; pagination: ProxyPagination }>(`/admin/proxies?page=${proxyPagination.page}&pageSize=${PROXY_PAGE_SIZE}`, activeToken),
         apiFetch<{ data: RuntimePayload }>("/admin/runtime", activeToken),
         apiFetch<{ data: MetricsPayload }>("/admin/metrics", activeToken),
       ]);
@@ -84,6 +95,7 @@ export function useConsoleData() {
       setModels(modelsData.data);
       setSettings(settingsData.data);
       setProxies(proxiesData.data);
+      setProxyPagination(proxiesData.pagination);
       setRuntime(runtimeData.data);
       setMetricsData(metricsResult.data);
       if (!modelsData.data.length && Array.isArray(publicModels.data)) {
@@ -92,7 +104,25 @@ export function useConsoleData() {
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [proxyPagination.page]);
+
+  const setProxyPage = useCallback(async (page: number) => {
+    const nextPage = Math.min(proxyPagination.totalPages, Math.max(1, page));
+    if (nextPage === proxyPagination.page) return;
+    setBusy(true);
+    try {
+      const result = await apiFetch<{ data: ProxyNode[]; pagination: ProxyPagination }>(
+        `/admin/proxies?page=${nextPage}&pageSize=${PROXY_PAGE_SIZE}`,
+        token,
+      );
+      setProxies(result.data);
+      setProxyPagination(result.pagination);
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "代理列表加载失败", "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [proxyPagination.page, proxyPagination.totalPages, pushToast, token]);
 
   const login = useCallback(async (candidate: string) => {
     const cleanToken = candidate.trim();
@@ -288,6 +318,7 @@ export function useConsoleData() {
     models,
     settings,
     proxies,
+    proxyPagination,
     runtime,
     metricsData,
     busy,
@@ -318,6 +349,7 @@ export function useConsoleData() {
     testProxy,
     deleteProxy,
     clearProxies,
+    setProxyPage,
     refresh,
   };
 }
