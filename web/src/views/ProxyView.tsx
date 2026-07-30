@@ -390,7 +390,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
           onChange={(event) => setImportText(event.target.value)}
           placeholder={"http://user:pass@1.2.3.4:8080\nsocks5://127.0.0.1:1080"}
         />
-        <p className="text-xs text-muted-foreground">共 {importText.split(/\r?\n/).filter((line) => line.trim()).length} 个地址，单次最多 1000 个。</p>
+        <p className="text-xs text-muted-foreground">共 {importText.split(/\r?\n/).filter((line) => line.trim()).length} 个地址，导入数量不限。</p>
       </Modal>
     </div>
   );

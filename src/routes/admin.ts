@@ -173,7 +173,6 @@ export const registerAdminRoutes = async (
       if (typeof addresses !== "string") throw new Error("addresses must be a string");
       const lines = addresses.split(/\r?\n/);
       if (!lines.some((line) => line.trim())) throw new Error("At least one proxy address is required");
-      if (lines.length > 1000) throw new Error("A maximum of 1000 proxy addresses can be imported at once");
       const result = proxyPool.import(lines);
       audit(request, "proxy.import", "success", { created: result.created.length, skipped: result.skipped.length });
       return reply.code(201).send({ data: result });
