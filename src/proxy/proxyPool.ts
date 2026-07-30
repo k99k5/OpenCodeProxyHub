@@ -59,6 +59,11 @@ export interface ProxyLease {
   requiredUnavailable?: boolean;
 }
 
+export interface ProxyImportResult {
+  created: ProxyNode[];
+  skipped: string[];
+}
+
 const today = () => new Date().toISOString().slice(0, 10);
 
 export class ProxyPoolStore {
@@ -86,6 +91,55 @@ export class ProxyPoolStore {
     this.proxies.push(node);
     this.persist();
     return { ...node };
+  }
+
+  import(addresses: string[]): ProxyImportResult {
+    const existingUrls = new Set(this.proxies.map((proxy) => proxy.url));
+    const pendingUrls = new Set<string>();
+    const created: ProxyNode[] = [];
+    const skipped: string[] = [];
+
+    for (const [index, rawAddress] of addresses.entries()) {
+      const address = rawAddress.trim();
+      if (!address) continue;
+      const normalizedAddress = /^[a-z][a-z\d+.-]*:\/\//i.test(address) ? address : `http://${address}`;
+      if (existingUrls.has(normalizedAddress) || pendingUrls.has(normalizedAddress)) {
+        skipped.push(normalizedAddress);
+        continue;
+      }
+
+      let parsed: URL;
+      try {
+        parsed = new URL(normalizedAddress);
+      } catch {
+        throw new Error(`Line ${index + 1}: invalid proxy URL`);
+      }
+
+      const type: ProxyType = parsed.protocol === "socks:" || parsed.protocol === "socks5:"
+        ? "socks5"
+        : parsed.protocol === "https:"
+          ? "https"
+          : "http";
+      const node = this.buildNode({
+        name: `${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`,
+        type,
+        url: normalizedAddress,
+      });
+      try {
+        this.validateNode(node);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "invalid proxy URL";
+        throw new Error(`Line ${index + 1}: ${message}`);
+      }
+      created.push(node);
+      pendingUrls.add(normalizedAddress);
+    }
+
+    if (created.length) {
+      this.proxies.push(...created);
+      this.persist();
+    }
+    return { created: created.map((node) => ({ ...node })), skipped };
   }
 
   update(id: string, input: ProxyInput): ProxyNode {
@@ -118,6 +172,14 @@ export class ProxyPoolStore {
     if (this.proxies.length === before) return false;
     this.persist();
     return true;
+  }
+
+  clear(): number {
+    const deleted = this.proxies.length;
+    if (deleted === 0) return 0;
+    this.proxies = [];
+    this.persist();
+    return deleted;
   }
 
   acquire(): ProxyLease {
