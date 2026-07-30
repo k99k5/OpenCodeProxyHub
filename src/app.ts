@@ -12,6 +12,7 @@ import { registerWebRoutes } from "./routes/web.js";
 import { ModelConfigStore } from "./models/catalog.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 import { ProxyPoolStore } from "./proxy/proxyPool.js";
+import { ProxySyncService } from "./proxy/proxySync.js";
 import { createLimiter } from "./rateLimit/limiter.js";
 import { RequestTracker } from "./runtime/requestTracker.js";
 import { MetricsStore, registerMetricsHooks } from "./observability/metrics.js";
@@ -43,6 +44,7 @@ export const buildApp = async (config: AppConfig) => {
   modelStore.load();
   const proxyPool = new ProxyPoolStore(config.proxiesFile, settingsStore);
   proxyPool.load();
+  const proxySync = new ProxySyncService(proxyPool, settingsStore, { logger: app.log });
   const sessions = new SessionStore();
   const requestTracker = new RequestTracker();
   const limiter = await createLimiter({
@@ -53,14 +55,18 @@ export const buildApp = async (config: AppConfig) => {
   }, config.redisUrl, config.redisKeyPrefix);
   app.log.info({ limiter: await limiter.snapshot() }, "limiter_ready");
   app.addHook("onClose", async () => {
+    proxySync.stop();
     const drained = await requestTracker.drain(config.shutdownDrainTimeoutMs);
     if (!drained) app.log.warn({ runtime: requestTracker.snapshot() }, "shutdown_drain_timeout");
     await limiter.close();
   });
+  app.addHook("onReady", async () => {
+    proxySync.start();
+  });
 
   await registerHealthRoutes(app, modelStore);
   await registerModelRoutes(app, modelStore);
-  await registerAdminRoutes(app, config, keyStore, modelStore, settingsStore, proxyPool, limiter, requestTracker, metrics, eventLogger);
+  await registerAdminRoutes(app, config, keyStore, modelStore, settingsStore, proxyPool, proxySync, limiter, requestTracker, metrics, eventLogger);
   await registerOpenAIRoutes(app, config, keyStore, modelStore, settingsStore, sessions, proxyPool, limiter, requestTracker, metrics, eventLogger);
   await registerAnthropicRoutes(app, config, keyStore, modelStore, settingsStore, sessions, proxyPool, limiter, requestTracker, metrics, eventLogger);
   await registerWebRoutes(app);
@@ -69,5 +75,5 @@ export const buildApp = async (config: AppConfig) => {
     return reply.code(404).send({ error: { message: "Route not found", type: "not_found_error" } });
   });
 
-  return { app, keyStore, requestTracker };
+  return { app, keyStore, requestTracker, proxySync };
 };

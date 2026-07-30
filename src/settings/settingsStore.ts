@@ -10,6 +10,8 @@ export interface SystemSettings {
   proxyMode: "direct" | "optional" | "required";
   outboundPreProxyEnabled: boolean;
   outboundPreProxyUrl: string;
+  proxyAutoSyncEnabled: boolean;
+  proxyAutoSyncIntervalMinutes: number;
   logEnabled: boolean;
   logAudit: boolean;
   logApiRequests: boolean;
@@ -34,6 +36,8 @@ const DEFAULT_SETTINGS: SystemSettings = {
   proxyMode: "optional",
   outboundPreProxyEnabled: false,
   outboundPreProxyUrl: "",
+  proxyAutoSyncEnabled: false,
+  proxyAutoSyncIntervalMinutes: 60,
   logEnabled: false,
   logAudit: true,
   logApiRequests: true,
@@ -111,6 +115,18 @@ export class SettingsStore {
         throw new Error("proxyMode must be direct, optional, or required");
       }
       this.settings.proxyMode = input.proxyMode;
+    }
+
+    if (input.proxyAutoSyncEnabled !== undefined) {
+      this.settings.proxyAutoSyncEnabled = Boolean(input.proxyAutoSyncEnabled);
+    }
+    if (input.proxyAutoSyncIntervalMinutes !== undefined) {
+      if (!Number.isFinite(input.proxyAutoSyncIntervalMinutes)
+        || input.proxyAutoSyncIntervalMinutes < 1
+        || input.proxyAutoSyncIntervalMinutes > 10080) {
+        throw new Error("proxyAutoSyncIntervalMinutes must be between 1 and 10080");
+      }
+      this.settings.proxyAutoSyncIntervalMinutes = Math.trunc(input.proxyAutoSyncIntervalMinutes);
     }
 
     // Pre-proxy: validate the merged (patch + current) state so enabled never coexists with an empty/invalid url.

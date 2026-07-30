@@ -142,6 +142,14 @@ If `OUTBOUND_PRE_PROXY_ENABLED=false`, proxy-pool nodes use the original direct 
 
 Proxy selection uses priority fill. The first available enabled node is used until it is unavailable, full, daily-limited, or disabled. A node is automatically disabled after 5 consecutive upstream 429 responses and requires manual re-enable. Use `PROXY_MODE=required` when requests must never fall back to direct upstream access.
 
+The proxy console also supports:
+
+- checking every configured proxy against `https://opencode.ai/` and deleting failed nodes
+- manually synchronizing 100 unique HTTP proxies from SCDN
+- enabling scheduled SCDN synchronization with a configurable interval
+
+The SCDN endpoint returns at most 20 proxies per request, so one synchronization uses multiple batches and updates the SCDN-managed set only after collecting 100 unique addresses. Manually managed proxies are preserved.
+
 ## Upgrade
 
 ```bash

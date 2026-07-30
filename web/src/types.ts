@@ -42,6 +42,8 @@ export interface SystemSettings {
   proxyMode: "direct" | "optional" | "required";
   outboundPreProxyEnabled: boolean;
   outboundPreProxyUrl: string;
+  proxyAutoSyncEnabled: boolean;
+  proxyAutoSyncIntervalMinutes: number;
   logEnabled: boolean;
   logAudit: boolean;
   logApiRequests: boolean;
@@ -54,6 +56,7 @@ export interface ProxyNode {
   name: string;
   type: "http" | "https" | "socks5";
   url: string;
+  source: string | null;
   enabled: boolean;
   weight: number;
   maxConcurrency: number;
@@ -70,6 +73,30 @@ export interface ProxyNode {
   lastError: string | null;
   lastUsedAt: string | null;
   lastCheckedAt: string | null;
+}
+
+export interface ProxySyncRunResult {
+  source: string;
+  received: number;
+  created: number;
+  retained: number;
+  removed: number;
+  total: number;
+  batches: number;
+}
+
+export interface ProxySyncStatus {
+  enabled: boolean;
+  intervalMinutes: number;
+  running: boolean;
+  targetCount: number;
+  sourceUrl: string;
+  nextRunAt: string | null;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  lastResult: ProxySyncRunResult | null;
 }
 
 export interface HealthPayload {
