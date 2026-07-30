@@ -202,9 +202,6 @@ export const pipeZenOpenAIResponse = (
     );
     return;
   }
-  const started = process.hrtime.bigint();
-  const durationMs = () =>
-    Number(process.hrtime.bigint() - started) / 1_000_000;
   const attemptedProxyIds = new Set<string>();
   if (prepared.lease?.node) attemptedProxyIds.add(prepared.lease.node.id);
   let activeReq: ReturnType<typeof https.request> | undefined;
@@ -215,6 +212,9 @@ export const pipeZenOpenAIResponse = (
   });
 
   const startAttempt = (): void => {
+    const started = process.hrtime.bigint();
+    const durationMs = () =>
+      Number(process.hrtime.bigint() - started) / 1_000_000;
     const attemptProxyId = prepared.lease?.node?.id;
     let markedFailure = false;
     let timedOut = false;
@@ -241,14 +241,23 @@ export const pipeZenOpenAIResponse = (
     const attemptReq = https.request(prepared.options, (zenRes) => {
       const statusCode = zenRes.statusCode || 502;
       if (shouldRetryStatus(statusCode)) {
-        failCurrent(`Upstream returned ${statusCode}`, statusCode);
-        zenRes.resume();
-        if (retry()) {
-          metrics?.recordUpstream({
-            statusCode,
-            durationMs: durationMs(),
-            proxyId: attemptProxyId,
+        const hasRetryCapacity =
+          proxyPool && attemptedProxyIds.size < MAX_PROXY_ATTEMPTS;
+        if (
+          hasRetryCapacity &&
+          replaceProxyLease(prepared, proxyPool, attemptedProxyIds)
+        ) {
+          superseded = true;
+          zenRes.once("close", () => {
+            failCurrent(`Upstream returned ${statusCode}`, statusCode);
+            metrics?.recordUpstream({
+              statusCode,
+              durationMs: durationMs(),
+              proxyId: attemptProxyId,
+            });
+            startAttempt();
           });
+          zenRes.destroy();
           return;
         }
       }
@@ -314,10 +323,14 @@ export const pipeZenOpenAIResponse = (
 
       zenRes.on("end", () => {
         if (attemptProxyId && proxyPool && !markedFailure) {
-          if (statusCode === 429)
-            proxyPool.markFailure(attemptProxyId, "Upstream returned 429", {
-              statusCode: 429,
-            });
+          if (shouldRetryStatus(statusCode))
+            proxyPool.markFailure(
+              attemptProxyId,
+              `Upstream returned ${statusCode}`,
+              {
+                statusCode,
+              },
+            );
           else proxyPool.markSuccess(attemptProxyId);
         }
         metrics?.recordUpstream({
