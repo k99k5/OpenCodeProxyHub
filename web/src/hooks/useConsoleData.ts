@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, ApiFetchError } from "../api";
 import type {
   ApiKeyItem,
@@ -43,6 +43,7 @@ export function useConsoleData() {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [proxies, setProxies] = useState<ProxyNode[]>([]);
   const [proxyPagination, setProxyPagination] = useState<ProxyPagination>({ page: 1, pageSize: PROXY_PAGE_SIZE, total: 0, totalPages: 1 });
+  const proxyPageRef = useRef(1);
   const [runtime, setRuntime] = useState<RuntimePayload | null>(null);
   const [metricsData, setMetricsData] = useState<MetricsPayload | null>(null);
 
@@ -67,6 +68,7 @@ export function useConsoleData() {
     setApiKeys([]);
     setSettings(null);
     setProxies([]);
+    proxyPageRef.current = 1;
     setProxyPagination({ page: 1, pageSize: PROXY_PAGE_SIZE, total: 0, totalPages: 1 });
     setRuntime(null);
     setMetricsData(null);
@@ -87,7 +89,7 @@ export function useConsoleData() {
         apiFetch<{ data: ApiKeyItem[] }>("/admin/api-keys", activeToken),
         apiFetch<{ data: ModelItem[] }>("/admin/models", activeToken),
         apiFetch<{ data: SystemSettings }>("/admin/settings", activeToken),
-        apiFetch<{ data: ProxyNode[]; pagination: ProxyPagination }>(`/admin/proxies?page=${proxyPagination.page}&pageSize=${PROXY_PAGE_SIZE}`, activeToken),
+        apiFetch<{ data: ProxyNode[]; pagination: ProxyPagination }>(`/admin/proxies?page=${proxyPageRef.current}&pageSize=${PROXY_PAGE_SIZE}`, activeToken),
         apiFetch<{ data: RuntimePayload }>("/admin/runtime", activeToken),
         apiFetch<{ data: MetricsPayload }>("/admin/metrics", activeToken),
       ]);
@@ -95,6 +97,7 @@ export function useConsoleData() {
       setModels(modelsData.data);
       setSettings(settingsData.data);
       setProxies(proxiesData.data);
+      proxyPageRef.current = proxiesData.pagination.page;
       setProxyPagination(proxiesData.pagination);
       setRuntime(runtimeData.data);
       setMetricsData(metricsResult.data);
@@ -104,7 +107,7 @@ export function useConsoleData() {
     } finally {
       setBusy(false);
     }
-  }, [proxyPagination.page]);
+  }, []);
 
   const setProxyPage = useCallback(async (page: number) => {
     const nextPage = Math.min(proxyPagination.totalPages, Math.max(1, page));
@@ -116,6 +119,7 @@ export function useConsoleData() {
         token,
       );
       setProxies(result.data);
+      proxyPageRef.current = result.pagination.page;
       setProxyPagination(result.pagination);
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "代理列表加载失败", "error");
@@ -124,7 +128,7 @@ export function useConsoleData() {
     }
   }, [proxyPagination.page, proxyPagination.totalPages, pushToast, token]);
 
-  const login = useCallback(async (candidate: string) => {
+  const login = useCallback(async (candidate: string, options: { notify?: boolean } = {}) => {
     const cleanToken = candidate.trim();
     if (!cleanToken) {
       setLoginError("请输入控制台密码");
@@ -138,7 +142,7 @@ export function useConsoleData() {
       setToken(cleanToken);
       setDraftToken(cleanToken);
       setAuthMode(session.data.mode);
-      pushToast("控制台已解锁", "success");
+      if (options.notify !== false) pushToast("控制台已解锁", "success");
       await loadPublic(cleanToken);
     } catch (err) {
       localStorage.removeItem("oph_admin_token");
@@ -154,7 +158,8 @@ export function useConsoleData() {
   useEffect(() => {
     const saved = localStorage.getItem("oph_admin_token") || "";
     if (saved) {
-      login(saved);
+      // Restoring an existing session is bootstrap work, not a user login action.
+      login(saved, { notify: false });
       return;
     }
     setAuthChecked(true);
