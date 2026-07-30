@@ -87,17 +87,50 @@ export interface ProxyCleanupResult {
   failures: ProxyCleanupFailure[];
 }
 
+export interface ProxyCleanupQueueStatus {
+  running: boolean;
+  total: number;
+  queued: number;
+  checking: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  deleted: number;
+  remaining: number;
+  concurrency: number;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
 export interface ProxyPoolOptions {
   probe?: (node: ProxyNode) => Promise<void>;
   testUrl?: string;
   testTimeoutMs?: number;
 }
 
+export const DEFAULT_PROXY_CONNECTIVITY_CHECK_URL = "https://cp.cloudflare.com/generate_204";
+export const DEFAULT_PROXY_CHECK_CONCURRENCY = 10;
+
 const today = () => new Date().toISOString().slice(0, 10);
 
 export class ProxyPoolStore {
   private readonly store: JsonFileStore<ProxyFile>;
   private proxies: ProxyNode[] = [];
+  private cleanupTail: Promise<void> = Promise.resolve();
+  private cleanupQueueStatus: ProxyCleanupQueueStatus = {
+    running: false,
+    total: 0,
+    queued: 0,
+    checking: 0,
+    completed: 0,
+    succeeded: 0,
+    failed: 0,
+    deleted: 0,
+    remaining: 0,
+    concurrency: DEFAULT_PROXY_CHECK_CONCURRENCY,
+    startedAt: null,
+    completedAt: null,
+  };
 
   constructor(
     proxiesFile: string,
@@ -116,6 +149,10 @@ export class ProxyPoolStore {
   list(): ProxyNode[] {
     this.resetDailyIfNeeded();
     return this.proxies.map((proxy) => ({ ...proxy }));
+  }
+
+  getCleanupQueueStatus(): ProxyCleanupQueueStatus {
+    return { ...this.cleanupQueueStatus };
   }
 
   create(input: ProxyInput): ProxyNode {
@@ -329,61 +366,97 @@ export class ProxyPoolStore {
     }
   }
 
-  async cleanupInvalid(concurrency = 10): Promise<ProxyCleanupResult> {
+  cleanupInvalid(concurrency = DEFAULT_PROXY_CHECK_CONCURRENCY): Promise<ProxyCleanupResult> {
+    const run = this.cleanupTail.then(() => this.runCleanupInvalid(concurrency));
+    this.cleanupTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async runCleanupInvalid(concurrency: number): Promise<ProxyCleanupResult> {
     const snapshot = this.proxies.map((node) => ({ ...node }));
+    const concurrencyLimit = Number.isFinite(concurrency) ? Math.max(1, Math.trunc(concurrency)) : 1;
+    const workerCount = Math.min(snapshot.length, concurrencyLimit);
+    const startedAt = new Date().toISOString();
+    this.cleanupQueueStatus = {
+      running: snapshot.length > 0,
+      total: snapshot.length,
+      queued: snapshot.length,
+      checking: 0,
+      completed: 0,
+      succeeded: 0,
+      failed: 0,
+      deleted: 0,
+      remaining: this.proxies.length,
+      concurrency: workerCount,
+      startedAt,
+      completedAt: snapshot.length === 0 ? startedAt : null,
+    };
     if (snapshot.length === 0) return { tested: 0, deleted: 0, remaining: 0, failures: [] };
 
-    const failed = new Map<string, { url: string; failure: ProxyCleanupFailure }>();
-    const succeeded = new Map<string, string>();
-    let cursor = 0;
-    const workerCount = Math.min(snapshot.length, Math.max(1, Math.trunc(concurrency)));
+    try {
+      const failed = new Map<string, { url: string; failure: ProxyCleanupFailure }>();
+      const succeeded = new Map<string, string>();
+      let cursor = 0;
 
-    const worker = async () => {
-      while (cursor < snapshot.length) {
-        const index = cursor;
-        cursor += 1;
-        const node = snapshot[index];
-        if (!node) continue;
-        try {
-          this.validateNode(node);
-          await this.probeNode(node);
-          succeeded.set(node.id, node.url);
-        } catch (error) {
-          failed.set(node.id, {
-            url: node.url,
-            failure: {
-              id: node.id,
-              name: node.name,
-              error: error instanceof Error ? error.message : "Proxy test failed",
-            },
-          });
+      const worker = async () => {
+        while (cursor < snapshot.length) {
+          const index = cursor;
+          cursor += 1;
+          const node = snapshot[index];
+          if (!node) continue;
+          this.cleanupQueueStatus.queued -= 1;
+          this.cleanupQueueStatus.checking += 1;
+          try {
+            this.validateNode(node);
+            await this.probeNode(node);
+            succeeded.set(node.id, node.url);
+            this.cleanupQueueStatus.succeeded += 1;
+          } catch (error) {
+            failed.set(node.id, {
+              url: node.url,
+              failure: {
+                id: node.id,
+                name: node.name,
+                error: error instanceof Error ? error.message : "Proxy test failed",
+              },
+            });
+            this.cleanupQueueStatus.failed += 1;
+          } finally {
+            this.cleanupQueueStatus.checking -= 1;
+            this.cleanupQueueStatus.completed += 1;
+          }
         }
+      };
+
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+      const checkedAt = new Date().toISOString();
+      for (const node of this.proxies) {
+        if (succeeded.get(node.id) !== node.url) continue;
+        node.lastCheckedAt = checkedAt;
+        node.lastError = null;
       }
-    };
 
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+      const before = this.proxies.length;
+      this.proxies = this.proxies.filter((node) => {
+        const failedNode = failed.get(node.id);
+        return !failedNode || failedNode.url !== node.url;
+      });
+      const deleted = before - this.proxies.length;
+      this.persist();
+      this.cleanupQueueStatus.deleted = deleted;
+      this.cleanupQueueStatus.remaining = this.proxies.length;
 
-    const checkedAt = new Date().toISOString();
-    for (const node of this.proxies) {
-      if (succeeded.get(node.id) !== node.url) continue;
-      node.lastCheckedAt = checkedAt;
-      node.lastError = null;
+      return {
+        tested: snapshot.length,
+        deleted,
+        remaining: this.proxies.length,
+        failures: [...failed.values()].map(({ failure }) => failure),
+      };
+    } finally {
+      this.cleanupQueueStatus.running = false;
+      this.cleanupQueueStatus.completedAt = new Date().toISOString();
     }
-
-    const before = this.proxies.length;
-    this.proxies = this.proxies.filter((node) => {
-      const failedNode = failed.get(node.id);
-      return !failedNode || failedNode.url !== node.url;
-    });
-    const deleted = before - this.proxies.length;
-    this.persist();
-
-    return {
-      tested: snapshot.length,
-      deleted,
-      remaining: this.proxies.length,
-      failures: [...failed.values()].map(({ failure }) => failure),
-    };
   }
 
   private buildNode(input: ProxyInput, source: string | null = null): ProxyNode {
@@ -427,7 +500,7 @@ export class ProxyPoolStore {
       return;
     }
 
-    const testUrl = this.options.testUrl || "https://opencode.ai/";
+    const testUrl = this.options.testUrl || DEFAULT_PROXY_CONNECTIVITY_CHECK_URL;
     const timeoutMs = this.options.testTimeoutMs ?? 10000;
     await new Promise<void>((resolve, reject) => {
       const req = https.get(testUrl, { agent: this.createAgent(node), timeout: timeoutMs }, (res) => {

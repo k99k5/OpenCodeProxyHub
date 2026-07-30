@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, ApiFetchError } from "../api";
 import type {
   ApiKeyItem,
@@ -7,6 +7,7 @@ import type {
   HealthPayload,
   MetricsPayload,
   ModelItem,
+  ProxyCleanupResult,
   ProxyDraft,
   ProxyNode,
   ProxySyncStatus,
@@ -41,6 +42,7 @@ export function useConsoleData() {
   const [busy, setBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const lastCleanupCompletion = useRef<string | null>(null);
 
   const pushToast = useCallback((text: string, tone: ToastTone = "info") => {
     const id = ++toastSeq;
@@ -135,6 +137,38 @@ export function useConsoleData() {
     setAuthChecked(true);
     loadPublic("").catch((err: Error) => setLoginError(err.message));
   }, [login, loadPublic]);
+
+  useEffect(() => {
+    if (!token) {
+      lastCleanupCompletion.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    const pollProxyMaintenance = async () => {
+      try {
+        const statusResponse = await apiFetch<{ data: ProxySyncStatus }>("/admin/proxy-sync", token);
+        if (cancelled) return;
+        setProxySyncStatus(statusResponse.data);
+
+        const completedAt = statusResponse.data.cleanupQueue.completedAt;
+        if (!completedAt || completedAt === lastCleanupCompletion.current) return;
+        lastCleanupCompletion.current = completedAt;
+        const proxiesResponse = await apiFetch<{ data: ProxyNode[] }>("/admin/proxies", token);
+        if (!cancelled) setProxies(proxiesResponse.data);
+      } catch {
+        // The regular authenticated actions handle and surface session or network errors.
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void pollProxyMaintenance();
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [token]);
 
   // Wraps an action: runs it, refreshes data, and routes errors (401 -> logout) to toast.
   const run = useCallback(
@@ -291,7 +325,7 @@ export function useConsoleData() {
         const result = response.data.result;
         if (!result) throw new Error("代理同步未返回结果");
         pushToast(
-          `已同步 ${result.received} 个代理：新增 ${result.created}，保留 ${result.retained}，移除 ${result.removed}`,
+          `已同步 ${result.received} 个代理；队列检测 ${result.cleanup.tested} 个，自动清理 ${result.cleanup.deleted} 个失效节点`,
           "success",
         );
       },
@@ -300,7 +334,7 @@ export function useConsoleData() {
   const cleanupInvalidProxies = () =>
     run(
       async () => {
-        const response = await apiFetch<{ data: { tested: number; deleted: number; remaining: number } }>(
+        const response = await apiFetch<{ data: ProxyCleanupResult }>(
           "/admin/proxies/cleanup-invalid",
           token,
           { method: "POST" },

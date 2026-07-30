@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
-import { ProxyPoolStore, type ProxyNode } from "../src/proxy/proxyPool.js";
+import { DEFAULT_PROXY_CONNECTIVITY_CHECK_URL, ProxyPoolStore, type ProxyNode } from "../src/proxy/proxyPool.js";
 import { ProxySyncService, SCDN_PROXY_SOURCE } from "../src/proxy/proxySync.js";
 import { SettingsStore } from "../src/settings/settingsStore.js";
 
@@ -26,6 +26,11 @@ const createPool = (probe?: (node: ProxyNode) => Promise<void>) => {
 };
 
 describe("ProxyPoolStore maintenance", () => {
+  test("uses a neutral public connectivity endpoint by default", () => {
+    assert.equal(DEFAULT_PROXY_CONNECTIVITY_CHECK_URL, "https://cp.cloudflare.com/generate_204");
+    assert.equal(DEFAULT_PROXY_CONNECTIVITY_CHECK_URL.includes("opencode.ai"), false);
+  });
+
   test("source sync replaces only stale nodes from the same source", () => {
     const { pool } = createPool();
     const manual = pool.create({ name: "manual", url: "http://manual.example:8080" });
@@ -65,12 +70,50 @@ describe("ProxyPoolStore maintenance", () => {
     assert.equal(result.failures.length, 1);
     assert.equal(result.failures[0]?.name, "dead");
     assert.deepEqual(pool.list().map((node) => node.name), ["healthy"]);
+    assert.deepEqual(
+      {
+        running: pool.getCleanupQueueStatus().running,
+        total: pool.getCleanupQueueStatus().total,
+        completed: pool.getCleanupQueueStatus().completed,
+        succeeded: pool.getCleanupQueueStatus().succeeded,
+        failed: pool.getCleanupQueueStatus().failed,
+        deleted: pool.getCleanupQueueStatus().deleted,
+      },
+      { running: false, total: 2, completed: 2, succeeded: 1, failed: 1, deleted: 1 },
+    );
+  });
+
+  test("reports live bounded-worker queue status", async () => {
+    let releaseProbe: (() => void) | undefined;
+    const probeGate = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    const { pool } = createPool(async () => probeGate);
+    pool.import(["queue-1.example:8080", "queue-2.example:8080", "queue-3.example:8080"]);
+
+    const cleanup = pool.cleanupInvalid(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(
+      {
+        running: pool.getCleanupQueueStatus().running,
+        total: pool.getCleanupQueueStatus().total,
+        queued: pool.getCleanupQueueStatus().queued,
+        checking: pool.getCleanupQueueStatus().checking,
+        completed: pool.getCleanupQueueStatus().completed,
+        concurrency: pool.getCleanupQueueStatus().concurrency,
+      },
+      { running: true, total: 3, queued: 2, checking: 1, completed: 0, concurrency: 1 },
+    );
+
+    releaseProbe?.();
+    await cleanup;
+    assert.equal(pool.getCleanupQueueStatus().completed, 3);
   });
 });
 
 describe("ProxySyncService", () => {
   test("fetches five 20-item batches and synchronizes 100 unique proxies", async () => {
-    const { pool, settings } = createPool();
+    const { pool, settings } = createPool(async () => undefined);
     let calls = 0;
     const fetchImpl = async () => {
       const batch = calls;
@@ -94,11 +137,13 @@ describe("ProxySyncService", () => {
     assert.equal(result.batches, 5);
     assert.equal(result.received, 100);
     assert.equal(result.created, 100);
+    assert.equal(result.cleanup.tested, 100);
+    assert.equal(result.cleanup.deleted, 0);
     assert.equal(pool.list().filter((node) => node.source === SCDN_PROXY_SOURCE).length, 100);
   });
 
   test("does not replace the current source set when unique addresses are insufficient", async () => {
-    const { pool, settings } = createPool();
+    const { pool, settings } = createPool(async () => undefined);
     pool.syncSource(SCDN_PROXY_SOURCE, ["192.0.2.1:8080"]);
     const repeated = Array.from({ length: 20 }, (_, index) => `198.51.100.${index + 1}:8080`);
     const fetchImpl = async () => new Response(
@@ -116,6 +161,70 @@ describe("ProxySyncService", () => {
     assert.deepEqual(
       pool.list().filter((node) => node.source === SCDN_PROXY_SOURCE).map((node) => node.url),
       ["http://192.0.2.1:8080"],
+    );
+  });
+
+  test("queues provider and user-imported nodes after sync and automatically deletes failures", async () => {
+    let activeChecks = 0;
+    let maxActiveChecks = 0;
+    const { pool, settings } = createPool(async (node) => {
+      activeChecks += 1;
+      maxActiveChecks = Math.max(maxActiveChecks, activeChecks);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (node.url === "http://manual-dead.example:8080" || node.url === "http://10.0.0.2:8080") {
+          throw new Error("public internet unavailable");
+        }
+      } finally {
+        activeChecks -= 1;
+      }
+    });
+    pool.import([
+      "manual-healthy.example:8080",
+      "manual-dead.example:8080",
+    ]);
+
+    const fetchImpl = async () => new Response(
+      JSON.stringify({
+        code: 200,
+        message: "success",
+        data: {
+          proxies: [
+            "10.0.0.1:8080",
+            "10.0.0.2:8080",
+            "10.0.0.3:8080",
+            "10.0.0.4:8080",
+          ],
+          count: 4,
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 4,
+      batchSize: 4,
+      maxBatches: 1,
+      cleanupConcurrency: 2,
+    });
+
+    const result = await service.syncNow();
+
+    assert.equal(result.cleanup.tested, 6);
+    assert.equal(result.cleanup.deleted, 2);
+    assert.equal(result.cleanup.remaining, 4);
+    assert.equal(result.total, 4);
+    assert.equal(maxActiveChecks, 2);
+    assert.equal(pool.list().some((node) => node.url === "http://manual-healthy.example:8080"), true);
+    assert.equal(pool.list().some((node) => node.url === "http://manual-dead.example:8080"), false);
+    assert.equal(pool.list().some((node) => node.url === "http://10.0.0.2:8080"), false);
+    assert.deepEqual(
+      {
+        total: service.getStatus().cleanupQueue.total,
+        completed: service.getStatus().cleanupQueue.completed,
+        concurrency: service.getStatus().cleanupQueue.concurrency,
+      },
+      { total: 6, completed: 6, concurrency: 2 },
     );
   });
 });
