@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { AlertTriangle, Check, CheckCircle2, Download, Network, Plus, Route, Trash2, Waypoints } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, Download, FileUp, Network, Plus, Route, Trash2, Waypoints } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -41,6 +41,9 @@ export function ProxyView({ data }: { data: ConsoleData }) {
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
+  const [importFileName, setImportFileName] = useState("");
+  const [importFileError, setImportFileError] = useState("");
+  const importFileRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [listHeight, setListHeight] = useState(720);
@@ -411,6 +414,8 @@ export function ProxyView({ data }: { data: ConsoleData }) {
                 const imported = await importProxies(importText);
                 if (!imported) return;
                 setImportText("");
+                setImportFileName("");
+                setImportFileError("");
                 setImportOpen(false);
               }}
             >
@@ -422,6 +427,36 @@ export function ProxyView({ data }: { data: ConsoleData }) {
         <p className="text-xs text-muted-foreground">
           每行填写一个代理地址，支持 http://、https://、socks:// 和 socks5://；省略协议时按 HTTP 导入。重复地址会自动跳过。
         </p>
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed border-border bg-muted/20 p-3">
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".txt,text/plain"
+            className="hidden"
+            disabled={busy}
+            onChange={async (event) => {
+              const file = event.target.files?.[0];
+              if (!file) return;
+              try {
+                setImportText(await file.text());
+                setImportFileName(file.name);
+                setImportFileError("");
+              } catch {
+                setImportFileName("");
+                setImportFileError("文件读取失败，请重新选择或手动粘贴代理地址。");
+              } finally {
+                event.target.value = "";
+              }
+            }}
+          />
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => importFileRef.current?.click()}>
+            <FileUp size={16} /> 选择文件
+          </Button>
+          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+            {importFileName || "支持 TXT 文本文件；选择后仍可在下方编辑"}
+          </span>
+        </div>
+        {importFileError && <p className="text-xs text-destructive">{importFileError}</p>}
         <textarea
           className="min-h-56 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           value={importText}
