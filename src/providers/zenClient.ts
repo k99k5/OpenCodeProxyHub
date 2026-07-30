@@ -1,5 +1,5 @@
 import https from "node:https";
-import type { ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
 import type { AppConfig } from "../config/env.js";
 import type { ZenFullResponse } from "../types/api.js";
@@ -43,6 +43,105 @@ const replaceProxyLease = (
 
 const shouldRetryStatus = (statusCode: number): boolean =>
   statusCode === 429 || statusCode >= 500;
+
+export interface ZenRetryingStream {
+  destroy(): void;
+}
+
+export const requestZenStreamWithRetry = (
+  prepared: ZenPreparedRequest,
+  proxyPool: ProxyPoolStore | undefined,
+  metrics: MetricsStore | undefined,
+  onResponse: (
+    response: IncomingMessage,
+    proxyId: string | undefined,
+    durationMs: () => number,
+  ) => void,
+  onError: (error: Error, statusCode: number) => void,
+): ZenRetryingStream => {
+  const attemptedProxyIds = new Set<string>();
+  if (prepared.lease?.node) attemptedProxyIds.add(prepared.lease.node.id);
+  let activeRequest: ReturnType<typeof https.request> | undefined;
+  let stopped = false;
+
+  const attempt = (): void => {
+    const started = process.hrtime.bigint();
+    const durationMs = () =>
+      Number(process.hrtime.bigint() - started) / 1_000_000;
+    const proxyId = prepared.lease?.node?.id;
+    let superseded = false;
+    let timedOut = false;
+    let responseAccepted = false;
+    const fail = (message: string, statusCode: number) => {
+      if (proxyId && proxyPool)
+        proxyPool.markFailure(proxyId, message, { statusCode });
+    };
+    const retry = (): boolean => {
+      if (stopped || !proxyPool || attemptedProxyIds.size >= MAX_PROXY_ATTEMPTS)
+        return false;
+      if (!replaceProxyLease(prepared, proxyPool, attemptedProxyIds))
+        return false;
+      superseded = true;
+      attempt();
+      return true;
+    };
+
+    const request = https.request(prepared.options, (response) => {
+      const statusCode = response.statusCode || 502;
+      if (
+        shouldRetryStatus(statusCode) &&
+        proxyPool &&
+        attemptedProxyIds.size < MAX_PROXY_ATTEMPTS &&
+        replaceProxyLease(prepared, proxyPool, attemptedProxyIds)
+      ) {
+        superseded = true;
+        response.once("close", () => {
+          fail(`Upstream returned ${statusCode}`, statusCode);
+          metrics?.recordUpstream({
+            statusCode,
+            durationMs: durationMs(),
+            proxyId,
+          });
+          if (!stopped) attempt();
+        });
+        response.destroy();
+        return;
+      }
+      responseAccepted = true;
+      onResponse(response, proxyId, durationMs);
+    });
+    activeRequest = request;
+    request.on("error", (error) => {
+      if (stopped || superseded || responseAccepted) return;
+      const statusCode = timedOut ? 504 : 502;
+      const message = timedOut ? "Upstream timeout" : error.message;
+      fail(message, statusCode);
+      metrics?.recordUpstream({
+        statusCode,
+        durationMs: durationMs(),
+        proxyId,
+        error: message,
+      });
+      if (!retry()) onError(timedOut ? new Error(message) : error, statusCode);
+    });
+    request.on("timeout", () => {
+      timedOut = true;
+      request.destroy(new Error("Upstream timeout"));
+    });
+    request.write(prepared.body);
+    request.end();
+  };
+
+  attempt();
+  return {
+    destroy: () => {
+      stopped = true;
+      activeRequest?.destroy();
+      const proxyId = prepared.lease?.node?.id;
+      if (proxyId && proxyPool) proxyPool.release(proxyId);
+    },
+  };
+};
 
 export const prepareZenRequest = (
   config: AppConfig,

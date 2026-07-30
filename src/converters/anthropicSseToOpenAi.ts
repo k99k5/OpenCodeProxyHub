@@ -1,11 +1,14 @@
-import https from "node:https";
 import type { ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
-import type { ZenPreparedRequest } from "../providers/zenClient.js";
+import {
+  requestZenStreamWithRetry,
+  type ZenPreparedRequest,
+} from "../providers/zenClient.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
 
-const noProxyAvailableError = "Proxy is required but no proxy node is available";
+const noProxyAvailableError =
+  "Proxy is required but no proxy node is available";
 
 type FinishReason = "stop" | "tool_calls" | "length";
 
@@ -38,7 +41,11 @@ const createState = (model: string): TransformState => ({
   doneSent: false,
 });
 
-const openAiChunk = (state: TransformState, delta: Record<string, unknown>, finishReason: FinishReason | null = null) => ({
+const openAiChunk = (
+  state: TransformState,
+  delta: Record<string, unknown>,
+  finishReason: FinishReason | null = null,
+) => ({
   id: state.id,
   object: "chat.completion.chunk",
   created: state.created,
@@ -87,17 +94,25 @@ const parseSseBlock = (raw: string): SseBlock | null => {
   let event: string | undefined;
   for (const line of raw.split("\n")) {
     if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    else if (line.startsWith("data:"))
+      dataLines.push(line.slice(5).trimStart());
   }
   if (!event && dataLines.length === 0) return null;
   return { event, data: dataLines.join("\n") };
 };
 
-const extractSseBlocks = (buffer: string): { blocks: SseBlock[]; rest: string } => {
+const extractSseBlocks = (
+  buffer: string,
+): { blocks: SseBlock[]; rest: string } => {
   const normalized = buffer.replace(/\r\n/g, "\n");
   const parts = normalized.split("\n\n");
   const rest = parts.pop() || "";
-  return { blocks: parts.map(parseSseBlock).filter((block): block is SseBlock => Boolean(block)), rest };
+  return {
+    blocks: parts
+      .map(parseSseBlock)
+      .filter((block): block is SseBlock => Boolean(block)),
+    rest,
+  };
 };
 
 const isPlainJson = (text: string): boolean => {
@@ -105,13 +120,21 @@ const isPlainJson = (text: string): boolean => {
   return trimmed.startsWith("{") && trimmed.endsWith("}");
 };
 
-const writeOpenAiError = (res: ServerResponse, statusCode: number, message: string): void => {
+const writeOpenAiError = (
+  res: ServerResponse,
+  statusCode: number,
+  message: string,
+): void => {
   if (res.headersSent) return;
   res.writeHead(statusCode, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: { message, type: "upstream_error" } }));
 };
 
-const handleParsedPayload = (state: TransformState, res: ServerResponse, parsed: any): void => {
+const handleParsedPayload = (
+  state: TransformState,
+  res: ServerResponse,
+  parsed: any,
+): void => {
   if (state.doneSent) return;
 
   if (Array.isArray(parsed?.choices)) {
@@ -125,44 +148,70 @@ const handleParsedPayload = (state: TransformState, res: ServerResponse, parsed:
     return;
   }
 
-  if (parsed?.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
+  if (
+    parsed?.type === "content_block_start" &&
+    parsed.content_block?.type === "tool_use"
+  ) {
     sendRole(state, res);
-    const blockIndex = Number.isInteger(parsed.index) ? parsed.index : state.nextToolIndex;
+    const blockIndex = Number.isInteger(parsed.index)
+      ? parsed.index
+      : state.nextToolIndex;
     const toolIndex = state.nextToolIndex;
     state.nextToolIndex += 1;
     state.blockToToolIndex.set(blockIndex, toolIndex);
     state.sawToolCall = true;
-    writeSse(res, openAiChunk(state, {
-      tool_calls: [{
-        index: toolIndex,
-        id: parsed.content_block.id || ocId("toolu"),
-        type: "function",
-        function: { name: parsed.content_block.name || "", arguments: "" },
-      }],
-    }));
+    writeSse(
+      res,
+      openAiChunk(state, {
+        tool_calls: [
+          {
+            index: toolIndex,
+            id: parsed.content_block.id || ocId("toolu"),
+            type: "function",
+            function: { name: parsed.content_block.name || "", arguments: "" },
+          },
+        ],
+      }),
+    );
     return;
   }
 
   if (parsed?.type === "content_block_delta") {
     const delta = parsed.delta || {};
-    if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
+    if (
+      delta.type === "text_delta" &&
+      typeof delta.text === "string" &&
+      delta.text.length > 0
+    ) {
       sendRole(state, res);
       writeSse(res, openAiChunk(state, { content: delta.text }));
       return;
     }
-    if (delta.type === "thinking_delta" && typeof delta.thinking === "string" && delta.thinking.length > 0) {
+    if (
+      delta.type === "thinking_delta" &&
+      typeof delta.thinking === "string" &&
+      delta.thinking.length > 0
+    ) {
       sendRole(state, res);
       writeSse(res, openAiChunk(state, { reasoning_content: delta.thinking }));
       return;
     }
-    if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+    if (
+      delta.type === "input_json_delta" &&
+      typeof delta.partial_json === "string"
+    ) {
       sendRole(state, res);
       const blockIndex = Number.isInteger(parsed.index) ? parsed.index : -1;
       const toolIndex = state.blockToToolIndex.get(blockIndex) ?? 0;
       state.sawToolCall = true;
-      writeSse(res, openAiChunk(state, {
-        tool_calls: [{ index: toolIndex, function: { arguments: delta.partial_json } }],
-      }));
+      writeSse(
+        res,
+        openAiChunk(state, {
+          tool_calls: [
+            { index: toolIndex, function: { arguments: delta.partial_json } },
+          ],
+        }),
+      );
     }
     return;
   }
@@ -173,7 +222,8 @@ const handleParsedPayload = (state: TransformState, res: ServerResponse, parsed:
   }
 
   if (parsed?.type === "message_stop") {
-    if (state.sawToolCall && state.stopReason === "stop") state.stopReason = "tool_calls";
+    if (state.sawToolCall && state.stopReason === "stop")
+      state.stopReason = "tool_calls";
     sendDone(state, res);
   }
 };
@@ -187,101 +237,103 @@ export const pipeAnthropicSseAsOpenAI = (
 ): void => {
   if (prepared.lease?.requiredUnavailable) {
     res.writeHead(503, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: { message: noProxyAvailableError, type: "proxy_unavailable" } }));
+    res.end(
+      JSON.stringify({
+        error: { message: noProxyAvailableError, type: "proxy_unavailable" },
+      }),
+    );
     return;
   }
 
   const state = createState(model);
-  const started = process.hrtime.bigint();
-  const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
   let buffer = "";
   let markedFailure = false;
   let receivedData = false;
 
-  const req = https.request(prepared.options, (zenRes) => {
-    zenRes.on("data", (chunk: Buffer) => {
-      receivedData = true;
-      buffer += chunk.toString();
+  const request = requestZenStreamWithRetry(
+    prepared,
+    proxyPool,
+    metrics,
+    (zenRes, proxyId, durationMs) => {
+      zenRes.on("data", (chunk: Buffer) => {
+        receivedData = true;
+        buffer += chunk.toString();
 
-      if (!res.headersSent && isPlainJson(buffer)) {
-        try {
-          const parsed = JSON.parse(buffer);
-          if (parsed.error || parsed.type === "error" || zenRes.statusCode && zenRes.statusCode >= 400) {
-            const message = parsed.error?.message || parsed.message || "Upstream error";
-            writeOpenAiError(res, zenRes.statusCode || 502, message);
-            zenRes.resume();
-            return;
+        if (!res.headersSent && isPlainJson(buffer)) {
+          try {
+            const parsed = JSON.parse(buffer);
+            if (
+              parsed.error ||
+              parsed.type === "error" ||
+              (zenRes.statusCode && zenRes.statusCode >= 400)
+            ) {
+              const message =
+                parsed.error?.message || parsed.message || "Upstream error";
+              writeOpenAiError(res, zenRes.statusCode || 502, message);
+              zenRes.resume();
+              return;
+            }
+          } catch {
+            // Continue parsing as SSE if this is not a complete JSON error body.
           }
-        } catch {
-          // Continue parsing as SSE if this is not a complete JSON error body.
         }
-      }
 
-      const extracted = extractSseBlocks(buffer);
-      buffer = extracted.rest;
-      for (const block of extracted.blocks) {
-        if (state.doneSent) continue;
-        if (block.data === "[DONE]") {
-          sendDone(state, res);
-          continue;
+        const extracted = extractSseBlocks(buffer);
+        buffer = extracted.rest;
+        for (const block of extracted.blocks) {
+          if (state.doneSent) continue;
+          if (block.data === "[DONE]") {
+            sendDone(state, res);
+            continue;
+          }
+          if (!block.data) continue;
+          try {
+            handleParsedPayload(state, res, JSON.parse(block.data));
+          } catch {
+            // Ignore malformed SSE payloads rather than corrupting the OpenAI stream.
+          }
         }
-        if (!block.data) continue;
-        try {
-          handleParsedPayload(state, res, JSON.parse(block.data));
-        } catch {
-          // Ignore malformed SSE payloads rather than corrupting the OpenAI stream.
+      });
+
+      zenRes.on("end", () => {
+        if (proxyId && proxyPool && !markedFailure) {
+          if (
+            (zenRes.statusCode || 502) === 429 ||
+            (zenRes.statusCode || 502) >= 500
+          )
+            proxyPool.markFailure(
+              proxyId,
+              `Upstream returned ${zenRes.statusCode || 502}`,
+              {
+                statusCode: zenRes.statusCode || 502,
+              },
+            );
+          else proxyPool.markSuccess(proxyId);
         }
-      }
-    });
+        metrics?.recordUpstream({
+          statusCode: zenRes.statusCode || 502,
+          durationMs: durationMs(),
+          proxyId,
+        });
 
-    zenRes.on("end", () => {
-      if (prepared.lease?.node && proxyPool && !markedFailure) {
-        if ((zenRes.statusCode || 502) === 429) proxyPool.markFailure(prepared.lease.node.id, "Upstream returned 429", { statusCode: 429 });
-        else proxyPool.markSuccess(prepared.lease.node.id);
+        if (!receivedData && !res.headersSent) {
+          writeOpenAiError(res, 502, "Empty response from upstream");
+          return;
+        }
+        if (!state.doneSent && !res.writableEnded) sendDone(state, res);
+        if (!res.writableEnded) res.end();
+      });
+    },
+    (error, statusCode) => {
+      if (!res.headersSent) {
+        writeOpenAiError(res, statusCode, `Upstream error: ${error.message}`);
+      } else if (!res.writableEnded) {
+        res.end();
       }
-      metrics?.recordUpstream({ statusCode: zenRes.statusCode || 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id });
-
-      if (!receivedData && !res.headersSent) {
-        writeOpenAiError(res, 502, "Empty response from upstream");
-        return;
-      }
-      if (!state.doneSent && !res.writableEnded) sendDone(state, res);
-      if (!res.writableEnded) res.end();
-    });
-  });
+    },
+  );
 
   res.on("close", () => {
-    if (!req.destroyed) req.destroy();
+    if (!res.writableEnded) request.destroy();
   });
-
-  req.on("error", (error) => {
-    if (prepared.lease?.node && proxyPool && !markedFailure) {
-      proxyPool.markFailure(prepared.lease.node.id, error.message);
-      markedFailure = true;
-    }
-    metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
-    if (!res.headersSent) {
-      writeOpenAiError(res, 502, `Upstream error: ${error.message}`);
-    } else if (!res.writableEnded) {
-      res.end();
-    }
-  });
-
-  req.on("timeout", () => {
-    req.destroy();
-    if (prepared.lease?.node && proxyPool && !markedFailure) {
-      proxyPool.markFailure(prepared.lease.node.id, "Upstream timeout");
-      markedFailure = true;
-    }
-    metrics?.recordUpstream({ statusCode: 504, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: "Upstream timeout" });
-    if (!res.headersSent) {
-      res.writeHead(504, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "Upstream timeout", type: "timeout_error" } }));
-    } else if (!res.writableEnded) {
-      res.end();
-    }
-  });
-
-  req.write(prepared.body);
-  req.end();
 };
