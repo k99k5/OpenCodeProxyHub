@@ -109,6 +109,26 @@ export const requestZenStreamWithRetry = (
       }
       responseAccepted = true;
       onResponse(response, proxyId, durationMs);
+      let responseFinished = false;
+      const handleResponseFailure = (error: Error): void => {
+        if (responseFinished || stopped) return;
+        responseFinished = true;
+        fail(error.message, 502);
+        metrics?.recordUpstream({
+          statusCode: 502,
+          durationMs: durationMs(),
+          proxyId,
+          error: error.message,
+        });
+        onError(error, 502);
+      };
+      response.once("end", () => {
+        responseFinished = true;
+      });
+      response.once("aborted", () => {
+        handleResponseFailure(new Error("Upstream response aborted"));
+      });
+      response.once("error", handleResponseFailure);
     });
     activeRequest = request;
     request.on("error", (error) => {
