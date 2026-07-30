@@ -85,20 +85,6 @@ export class ProxyPoolStore {
     return this.proxies.map((proxy) => ({ ...proxy }));
   }
 
-  listPage(requestedPage: number, pageSize: number): { data: ProxyNode[]; page: number; total: number; totalPages: number } {
-    this.resetDailyIfNeeded();
-    const total = this.proxies.length;
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    const page = Math.min(totalPages, Math.max(1, requestedPage));
-    const start = (page - 1) * pageSize;
-    return {
-      data: this.proxies.slice(start, start + pageSize).map((proxy) => ({ ...proxy })),
-      page,
-      total,
-      totalPages,
-    };
-  }
-
   create(input: ProxyInput): ProxyNode {
     const node = this.buildNode(input);
     this.validateNode(node);

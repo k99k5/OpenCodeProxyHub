@@ -144,17 +144,7 @@ export const registerAdminRoutes = async (
     }
   });
 
-  app.get<{ Querystring: { page?: string; pageSize?: string } }>("/admin/proxies", async (request) => {
-    const requestedPage = Number.parseInt(request.query.page || "1", 10);
-    const requestedPageSize = Number.parseInt(request.query.pageSize || "3000", 10);
-    const pageSize = Number.isFinite(requestedPageSize) ? Math.min(3000, Math.max(1, requestedPageSize)) : 3000;
-    const result = proxyPool.listPage(Number.isFinite(requestedPage) ? requestedPage : 1, pageSize);
-
-    return {
-      data: result.data,
-      pagination: { page: result.page, pageSize, total: result.total, totalPages: result.totalPages },
-    };
-  });
+  app.get("/admin/proxies", async () => ({ data: proxyPool.list() }));
 
   app.get("/admin/runtime", async () => ({
     data: {
