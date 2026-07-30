@@ -5,6 +5,11 @@ import type { AppConfig } from "../config/env.js";
 import type { ZenFullResponse } from "../types/api.js";
 import type { ProxyLease, ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
+import {
+  armProxyConnectTimeout,
+  resolveProxyConnectTimeoutError,
+  type ArmedProxyConnectTimeout,
+} from "../proxy/connectTimeout.js";
 
 const OC_VERSION = "1.15.0";
 const noProxyAvailableError =
@@ -43,6 +48,40 @@ const replaceProxyLease = (
 
 const shouldRetryStatus = (statusCode: number): boolean =>
   statusCode === 429 || statusCode >= 500;
+
+const resolveRequestFailure = (
+  error: Error,
+  upstreamTimedOut: boolean,
+  proxyConnectTimeout: ArmedProxyConnectTimeout,
+): { error: Error; message: string; statusCode: number; timedOut: boolean } => {
+  const proxyTimeoutError = resolveProxyConnectTimeoutError(
+    error,
+    proxyConnectTimeout,
+  );
+  if (proxyTimeoutError) {
+    return {
+      error: proxyTimeoutError,
+      message: proxyTimeoutError.message,
+      statusCode: 504,
+      timedOut: true,
+    };
+  }
+  if (upstreamTimedOut) {
+    const timeoutError = new Error("Upstream timeout");
+    return {
+      error: timeoutError,
+      message: timeoutError.message,
+      statusCode: 504,
+      timedOut: true,
+    };
+  }
+  return {
+    error,
+    message: error.message,
+    statusCode: 502,
+    timedOut: false,
+  };
+};
 
 export interface ZenRetryingStream {
   destroy(): void;
@@ -130,19 +169,26 @@ export const requestZenStreamWithRetry = (
       });
       response.once("error", handleResponseFailure);
     });
+    const proxyConnectTimeout = armProxyConnectTimeout(
+      request,
+      prepared.lease?.connection,
+    );
     activeRequest = request;
     request.on("error", (error) => {
       if (stopped || superseded || responseAccepted) return;
-      const statusCode = timedOut ? 504 : 502;
-      const message = timedOut ? "Upstream timeout" : error.message;
-      fail(message, statusCode);
+      const failure = resolveRequestFailure(
+        error,
+        timedOut,
+        proxyConnectTimeout,
+      );
+      fail(failure.message, failure.statusCode);
       metrics?.recordUpstream({
-        statusCode,
+        statusCode: failure.statusCode,
         durationMs: durationMs(),
         proxyId,
-        error: message,
+        error: failure.message,
       });
-      if (!retry()) onError(timedOut ? new Error(message) : error, statusCode);
+      if (!retry()) onError(failure.error, failure.statusCode);
     });
     request.on("timeout", () => {
       timedOut = true;
@@ -228,6 +274,7 @@ export const requestZenFull = (
       const attemptProxyId = prepared.lease?.node?.id;
       let failed = false;
       let timedOut = false;
+      let superseded = false;
       const failCurrent = (message: string, statusCode: number): void => {
         if (failed || !attemptProxyId || !proxyPool) return;
         failed = true;
@@ -248,6 +295,7 @@ export const requestZenFull = (
           if (shouldRetryStatus(statusCode)) {
             failCurrent(`Upstream returned ${statusCode}`, statusCode);
             if (retry()) {
+              superseded = true;
               metrics?.recordUpstream({
                 statusCode,
                 durationMs: durationMs(),
@@ -273,24 +321,32 @@ export const requestZenFull = (
           }
         });
       });
+      const proxyConnectTimeout = armProxyConnectTimeout(
+        req,
+        prepared.lease?.connection,
+      );
 
       req.on("error", (error) => {
-        if (settled) return;
-        const statusCode = timedOut ? 504 : 502;
-        const message = timedOut ? "Upstream timeout" : error.message;
-        failCurrent(message, statusCode);
+        if (settled || superseded) return;
+        const failure = resolveRequestFailure(
+          error,
+          timedOut,
+          proxyConnectTimeout,
+        );
+        failCurrent(failure.message, failure.statusCode);
         metrics?.recordUpstream({
-          statusCode,
+          statusCode: failure.statusCode,
           durationMs: durationMs(),
           proxyId: attemptProxyId,
-          error: message,
+          error: failure.message,
         });
         if (retry()) {
+          superseded = true;
           attempt();
           return;
         }
         settled = true;
-        reject(timedOut ? new Error(message) : error);
+        reject(failure.error);
       });
       req.on("timeout", () => {
         timedOut = true;
@@ -474,28 +530,35 @@ export const pipeZenOpenAIResponse = (
         if (headersSent) res.end();
       });
     });
+    const proxyConnectTimeout = armProxyConnectTimeout(
+      attemptReq,
+      prepared.lease?.connection,
+    );
     activeReq = attemptReq;
 
     attemptReq.on("error", (error) => {
       if (finished || superseded) return;
-      const statusCode = timedOut ? 504 : 502;
-      const message = timedOut ? "Upstream timeout" : error.message;
-      failCurrent(message, statusCode);
+      const failure = resolveRequestFailure(
+        error,
+        timedOut,
+        proxyConnectTimeout,
+      );
+      failCurrent(failure.message, failure.statusCode);
       metrics?.recordUpstream({
-        statusCode,
+        statusCode: failure.statusCode,
         durationMs: durationMs(),
         proxyId: attemptProxyId,
-        error: message,
+        error: failure.message,
       });
       if (retry()) return;
       finished = true;
       if (!res.headersSent) {
-        res.writeHead(statusCode, { "Content-Type": "application/json" });
+        res.writeHead(failure.statusCode, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             error: {
-              message,
-              type: timedOut ? "timeout_error" : "upstream_error",
+              message: failure.message,
+              type: failure.timedOut ? "timeout_error" : "upstream_error",
             },
           }),
         );

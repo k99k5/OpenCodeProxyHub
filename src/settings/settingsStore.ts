@@ -3,6 +3,7 @@ import { JsonFileStore } from "../storage/jsonFile.js";
 export interface SystemSettings {
   requestBodyLimitBytes: number;
   upstreamTimeoutMs: number;
+  proxyConnectTimeoutMs: number;
   defaultStream: boolean;
   logPrompts: boolean;
   openAiStreamTransformModels: string[];
@@ -29,6 +30,7 @@ export type SystemSettingsUpdate = Partial<SystemSettings>;
 const DEFAULT_SETTINGS: SystemSettings = {
   requestBodyLimitBytes: 10 * 1024 * 1024,
   upstreamTimeoutMs: 120000,
+  proxyConnectTimeoutMs: 5000,
   defaultStream: false,
   logPrompts: false,
   openAiStreamTransformModels: [],
@@ -77,6 +79,15 @@ export class SettingsStore {
         throw new Error("upstreamTimeoutMs must be at least 1000");
       }
       this.settings.upstreamTimeoutMs = Math.trunc(input.upstreamTimeoutMs);
+    }
+
+    if (input.proxyConnectTimeoutMs !== undefined) {
+      if (!Number.isFinite(input.proxyConnectTimeoutMs)
+        || input.proxyConnectTimeoutMs < 1000
+        || input.proxyConnectTimeoutMs > 60000) {
+        throw new Error("proxyConnectTimeoutMs must be between 1000 and 60000");
+      }
+      this.settings.proxyConnectTimeoutMs = Math.trunc(input.proxyConnectTimeoutMs);
     }
 
     if (input.defaultStream !== undefined) this.settings.defaultStream = Boolean(input.defaultStream);

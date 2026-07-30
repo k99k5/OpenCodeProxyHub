@@ -21,6 +21,7 @@ import { EventLogger } from "./observability/eventLogger.js";
 export const buildApp = async (config: AppConfig) => {
   const settingsStore = new SettingsStore(config.settingsFile, {
     upstreamTimeoutMs: config.upstreamTimeoutMs,
+    proxyConnectTimeoutMs: config.proxyConnectTimeoutMs,
     proxyMode: config.proxyMode,
     outboundPreProxyEnabled: config.outboundPreProxyEnabled,
     outboundPreProxyUrl: config.outboundPreProxyUrl,

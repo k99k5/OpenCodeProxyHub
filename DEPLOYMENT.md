@@ -142,6 +142,14 @@ If `OUTBOUND_PRE_PROXY_ENABLED=false`, proxy-pool nodes use the original direct 
 
 Proxy selection uses priority fill. The first available enabled node is used until it is unavailable, full, daily-limited, or disabled. A node is automatically disabled after 5 consecutive upstream 429 responses and requires manual re-enable. Use `PROXY_MODE=required` when requests must never fall back to direct upstream access.
 
+Proxy connection establishment has a separate timeout from the upstream request timeout:
+
+```text
+PROXY_CONNECT_TIMEOUT_MS=5000
+```
+
+It covers the proxy TCP connection, HTTP `CONNECT` or SOCKS5 negotiation, proxy authentication, and the target TLS handshake. When it expires, the node enters the normal 5-minute cooldown and the request switches to another untried proxy. It does not limit model generation or an established response stream. The value can also be changed at runtime as `proxyConnectTimeoutMs` in the Web console or `PATCH /admin/settings`.
+
 The proxy console also supports:
 
 - checking every configured proxy through a bounded worker queue (at most 10 concurrent checks) against Cloudflare's `https://cp.cloudflare.com/generate_204` connectivity endpoint and deleting nodes that cannot access the public internet

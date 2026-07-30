@@ -29,7 +29,7 @@ OpenCodeProxyHub has been substantially rewritten and expanded, but keeps this a
 ## Runtime And Build Dependencies
 
 OpenCodeProxyHub uses Node.js, TypeScript, Fastify, the `redis` client,
-`https-proxy-agent`, `socks-proxy-agent`, `dotenv`, React, Vite, Tailwind CSS,
+`https-proxy-agent`, `socks-proxy-agent`, `socks`, `dotenv`, React, Vite, Tailwind CSS,
 daisyUI, and their related transitive dependencies.
 
 The dependency license review performed during development found the dependency

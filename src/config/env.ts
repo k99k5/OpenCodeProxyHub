@@ -31,6 +31,7 @@ export interface AppConfig {
   zenHost: string;
   zenPath: string;
   upstreamTimeoutMs: number;
+  proxyConnectTimeoutMs: number;
   globalRequestsPerMinute: number;
   apiKeyRequestsPerMinute: number;
   apiKeyMaxConcurrentRequests: number;
@@ -56,6 +57,7 @@ export const loadConfig = (): AppConfig => ({
   zenHost: process.env.ZEN_HOST || "opencode.ai",
   zenPath: process.env.ZEN_PATH || "/zen/v1/chat/completions",
   upstreamTimeoutMs: intFromEnv("UPSTREAM_TIMEOUT_MS", 120000),
+  proxyConnectTimeoutMs: intFromEnv("PROXY_CONNECT_TIMEOUT_MS", 5000),
   globalRequestsPerMinute: intFromEnv("GLOBAL_REQUESTS_PER_MINUTE", 120),
   apiKeyRequestsPerMinute: intFromEnv("API_KEY_REQUESTS_PER_MINUTE", 60),
   apiKeyMaxConcurrentRequests: intFromEnv("API_KEY_MAX_CONCURRENT_REQUESTS", 10),
