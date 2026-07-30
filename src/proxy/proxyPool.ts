@@ -182,11 +182,12 @@ export class ProxyPoolStore {
     return deleted;
   }
 
-  acquire(): ProxyLease {
+  acquire(excludedIds: ReadonlySet<string> = new Set()): ProxyLease {
     this.resetDailyIfNeeded();
     const now = Date.now();
     const candidates = this.proxies
       .filter((node) => node.enabled)
+      .filter((node) => !excludedIds.has(node.id))
       .filter((node) => !node.cooldownUntil || Date.parse(node.cooldownUntil) <= now)
       .filter((node) => node.dailyRequestLimit === 0 || node.dailyRequestCount < node.dailyRequestLimit)
       .filter((node) => node.currentConcurrency < node.maxConcurrency)

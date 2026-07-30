@@ -25,6 +25,19 @@ export interface ZenPreparedRequest {
   lease?: ProxyLease;
 }
 
+const MAX_PROXY_ATTEMPTS = 3;
+
+const replaceProxyLease = (prepared: ZenPreparedRequest, proxyPool: ProxyPoolStore, attemptedProxyIds: Set<string>): boolean => {
+  const lease = proxyPool.acquire(attemptedProxyIds);
+  if (!lease.node || !lease.agent) return false;
+  attemptedProxyIds.add(lease.node.id);
+  prepared.lease = lease;
+  prepared.options.agent = lease.agent;
+  return true;
+};
+
+const shouldRetryStatus = (statusCode: number): boolean => statusCode === 429 || statusCode >= 500;
+
 export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, proxyPool?: ProxyPoolStore): ZenPreparedRequest => {
   const requestBody: Record<string, unknown> = {
     model: input.model,
@@ -71,39 +84,72 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
       reject(new Error(noProxyAvailableError));
       return;
     }
-    const started = process.hrtime.bigint();
-    const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
-    const req = https.request(prepared.options, (zenRes) => {
+    const attemptedProxyIds = new Set<string>();
+    if (prepared.lease?.node) attemptedProxyIds.add(prepared.lease.node.id);
+    let settled = false;
+
+    const attempt = (): void => {
+      const started = process.hrtime.bigint();
+      const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
+      const attemptProxyId = prepared.lease?.node?.id;
+      let failed = false;
+      let timedOut = false;
+      const failCurrent = (message: string, statusCode: number): void => {
+        if (failed || !attemptProxyId || !proxyPool) return;
+        failed = true;
+        proxyPool.markFailure(attemptProxyId, message, { statusCode });
+      };
+      const retry = (): boolean => Boolean(proxyPool && attemptedProxyIds.size < MAX_PROXY_ATTEMPTS && replaceProxyLease(prepared, proxyPool, attemptedProxyIds));
+
+      const req = https.request(prepared.options, (zenRes) => {
       const chunks: Buffer[] = [];
       zenRes.on("data", (chunk: Buffer) => chunks.push(chunk));
       zenRes.on("end", () => {
-        if (prepared.lease?.node && proxyPool) {
-          if ((zenRes.statusCode || 502) === 429) proxyPool.markFailure(prepared.lease.node.id, "Upstream returned 429", { statusCode: 429 });
-          else proxyPool.markSuccess(prepared.lease.node.id);
+        const statusCode = zenRes.statusCode || 502;
+        if (shouldRetryStatus(statusCode)) {
+          failCurrent(`Upstream returned ${statusCode}`, statusCode);
+          if (retry()) {
+            metrics?.recordUpstream({ statusCode, durationMs: durationMs(), proxyId: attemptProxyId });
+            attempt();
+            return;
+          }
+        } else if (attemptProxyId && proxyPool) {
+          proxyPool.markSuccess(attemptProxyId);
         }
-        metrics?.recordUpstream({ statusCode: zenRes.statusCode || 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id });
+        metrics?.recordUpstream({ statusCode, durationMs: durationMs(), proxyId: attemptProxyId });
         const raw = Buffer.concat(chunks).toString();
+        settled = true;
         try {
-          resolve({ status: zenRes.statusCode || 502, data: JSON.parse(raw), raw });
+          resolve({ status: statusCode, data: JSON.parse(raw), raw });
         } catch {
-          resolve({ status: zenRes.statusCode || 502, data: null, raw });
+          resolve({ status: statusCode, data: null, raw });
         }
       });
     });
 
     req.on("error", (error) => {
-      if (prepared.lease?.node && proxyPool) proxyPool.markFailure(prepared.lease.node.id, error.message);
-      metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
-      reject(error);
+      if (settled) return;
+      const statusCode = timedOut ? 504 : 502;
+      const message = timedOut ? "Upstream timeout" : error.message;
+      failCurrent(message, statusCode);
+      metrics?.recordUpstream({ statusCode, durationMs: durationMs(), proxyId: attemptProxyId, error: message });
+      if (retry()) {
+        attempt();
+        return;
+      }
+      settled = true;
+      reject(timedOut ? new Error(message) : error);
     });
     req.on("timeout", () => {
-      req.destroy();
-      if (prepared.lease?.node && proxyPool) proxyPool.markFailure(prepared.lease.node.id, "Upstream timeout");
-      metrics?.recordUpstream({ statusCode: 504, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: "Upstream timeout" });
-      reject(new Error("Upstream timeout"));
+      timedOut = true;
+      req.destroy(new Error("Upstream timeout"));
+      // The resulting error event owns retry/rejection so this attempt is handled once.
     });
     req.write(prepared.body);
     req.end();
+    };
+
+    attempt();
   });
 };
 
@@ -115,8 +161,37 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
   }
   const started = process.hrtime.bigint();
   const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
-  let markedFailure = false;
-  const req = https.request(prepared.options, (zenRes) => {
+  const attemptedProxyIds = new Set<string>();
+  if (prepared.lease?.node) attemptedProxyIds.add(prepared.lease.node.id);
+  let req: ReturnType<typeof https.request>;
+  let finished = false;
+
+  const startAttempt = (): void => {
+    const attemptProxyId = prepared.lease?.node?.id;
+    let markedFailure = false;
+    let timedOut = false;
+    const failCurrent = (message: string, statusCode: number): void => {
+      if (markedFailure || !attemptProxyId || !proxyPool) return;
+      markedFailure = true;
+      proxyPool.markFailure(attemptProxyId, message, { statusCode });
+    };
+    const retry = (): boolean => {
+      if (!proxyPool || res.headersSent || attemptedProxyIds.size >= MAX_PROXY_ATTEMPTS) return false;
+      if (!replaceProxyLease(prepared, proxyPool, attemptedProxyIds)) return false;
+      startAttempt();
+      return true;
+    };
+
+    req = https.request(prepared.options, (zenRes) => {
+    const statusCode = zenRes.statusCode || 502;
+    if (shouldRetryStatus(statusCode)) {
+      failCurrent(`Upstream returned ${statusCode}`, statusCode);
+      zenRes.resume();
+      if (retry()) {
+        metrics?.recordUpstream({ statusCode, durationMs: durationMs(), proxyId: attemptProxyId });
+        return;
+      }
+    }
     let firstChunk: Buffer | null = null;
     let headersSent = false;
 
@@ -129,10 +204,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
             const parsed = JSON.parse(str);
             if (parsed.error || parsed.type === "error") {
               const errMsg = parsed.error?.message || parsed.message || "Rate limit exceeded";
-              if (prepared.lease?.node && proxyPool) {
-                proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: 429 });
-                markedFailure = true;
-              }
+              failCurrent(errMsg, 429);
               if (!res.headersSent) {
                 res.writeHead(429, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ error: { message: `${errMsg} (free model rate limit)`, type: "rate_limit_error", code: "rate_limit_exceeded" } }));
@@ -165,11 +237,11 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
     });
 
     zenRes.on("end", () => {
-      if (prepared.lease?.node && proxyPool && !markedFailure) {
-        if ((zenRes.statusCode || 502) === 429) proxyPool.markFailure(prepared.lease.node.id, "Upstream returned 429", { statusCode: 429 });
-        else proxyPool.markSuccess(prepared.lease.node.id);
+      if (attemptProxyId && proxyPool && !markedFailure) {
+        if (statusCode === 429) proxyPool.markFailure(attemptProxyId, "Upstream returned 429", { statusCode: 429 });
+        else proxyPool.markSuccess(attemptProxyId);
       }
-      metrics?.recordUpstream({ statusCode: zenRes.statusCode || 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id });
+      metrics?.recordUpstream({ statusCode, durationMs: durationMs(), proxyId: attemptProxyId });
       if (!headersSent && !firstChunk) {
         if (!res.headersSent) {
           res.writeHead(502, { "Content-Type": "application/json" });
@@ -186,24 +258,27 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
   });
 
   req.on("error", (error) => {
-    if (prepared.lease?.node && proxyPool && !markedFailure) proxyPool.markFailure(prepared.lease.node.id, error.message);
-    metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
+    if (finished) return;
+    const statusCode = timedOut ? 504 : 502;
+    const message = timedOut ? "Upstream timeout" : error.message;
+    failCurrent(message, statusCode);
+    metrics?.recordUpstream({ statusCode, durationMs: durationMs(), proxyId: attemptProxyId, error: message });
+    if (retry()) return;
+    finished = true;
     if (!res.headersSent) {
-      res.writeHead(502, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { message: `Upstream error: ${error.message}`, type: "upstream_error" } }));
+      res.writeHead(statusCode, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message, type: timedOut ? "timeout_error" : "upstream_error" } }));
     }
   });
 
   req.on("timeout", () => {
-    req.destroy();
-    if (prepared.lease?.node && proxyPool && !markedFailure) proxyPool.markFailure(prepared.lease.node.id, "Upstream timeout");
-    metrics?.recordUpstream({ statusCode: 504, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: "Upstream timeout" });
-    if (!res.headersSent) {
-      res.writeHead(504, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "Upstream timeout", type: "timeout_error" } }));
-    }
+    timedOut = true;
+    req.destroy(new Error("Upstream timeout"));
   });
 
   req.write(prepared.body);
   req.end();
+  };
+
+  startAttempt();
 };
