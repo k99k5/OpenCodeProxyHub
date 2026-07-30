@@ -1,10 +1,14 @@
 import crypto from "node:crypto";
 import https from "node:https";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { SocksProxyAgent } from "socks-proxy-agent";
 import { JsonFileStore } from "../storage/jsonFile.js";
 import type { SettingsStore } from "../settings/settingsStore.js";
 import { HttpPreProxyToHttpAgent, HttpPreProxyToSocksAgent } from "./chainedAgent.js";
+import {
+  armProxyConnectTimeout,
+  type ProxyConnectionControl,
+} from "./connectTimeout.js";
+import { ConnectTimeoutSocksProxyAgent } from "./socksConnectAgent.js";
 
 export type ProxyType = "http" | "https" | "socks5";
 
@@ -57,7 +61,13 @@ export interface ProxyInput {
 export interface ProxyLease {
   node: ProxyNode | null;
   agent?: https.Agent;
+  connection?: ProxyConnectionControl;
   requiredUnavailable?: boolean;
+}
+
+interface ProxyAgentHandle {
+  agent: https.Agent;
+  connection: ProxyConnectionControl;
 }
 
 export interface ProxyImportResult {
@@ -306,7 +316,12 @@ export class ProxyPoolStore {
     this.disableIfDailyLimitReached(node);
     this.persist();
 
-    return { node: { ...node }, agent: this.createAgent(node) };
+    const handle = this.createAgent(node);
+    return {
+      node: { ...node },
+      agent: handle.agent,
+      connection: handle.connection,
+    };
   }
 
   release(id: string): void {
@@ -486,12 +501,34 @@ export class ProxyPoolStore {
     };
   }
 
-  private createAgent(node: ProxyNode): https.Agent {
+  private createAgent(node: ProxyNode): ProxyAgentHandle {
     const settings = this.settingsStore.get();
     const preProxyUrl = settings.outboundPreProxyEnabled ? settings.outboundPreProxyUrl : "";
-    if (preProxyUrl && node.type === "socks5") return new HttpPreProxyToSocksAgent(preProxyUrl, node.url);
-    if (preProxyUrl && ["http", "https"].includes(node.type)) return new HttpPreProxyToHttpAgent(preProxyUrl, node.url);
-    return node.type === "socks5" ? new SocksProxyAgent(node.url) as unknown as https.Agent : new HttpsProxyAgent(node.url) as unknown as https.Agent;
+    const controller = new AbortController();
+    const connection: ProxyConnectionControl = {
+      timeoutMs: settings.proxyConnectTimeoutMs,
+      abort: (reason) => {
+        if (!controller.signal.aborted) controller.abort(reason);
+      },
+    };
+
+    let agent: https.Agent;
+    if (preProxyUrl && node.type === "socks5") {
+      agent = new HttpPreProxyToSocksAgent(preProxyUrl, node.url, controller.signal);
+    } else if (preProxyUrl && ["http", "https"].includes(node.type)) {
+      agent = new HttpPreProxyToHttpAgent(preProxyUrl, node.url, controller.signal);
+    } else if (node.type === "socks5") {
+      agent = new ConnectTimeoutSocksProxyAgent(
+        node.url,
+        settings.proxyConnectTimeoutMs,
+        controller.signal,
+      ) as unknown as https.Agent;
+    } else {
+      agent = new HttpsProxyAgent(node.url, {
+        signal: controller.signal,
+      }) as unknown as https.Agent;
+    }
+    return { agent, connection };
   }
 
   private async probeNode(node: ProxyNode): Promise<void> {
@@ -503,7 +540,8 @@ export class ProxyPoolStore {
     const testUrl = this.options.testUrl || DEFAULT_PROXY_CONNECTIVITY_CHECK_URL;
     const timeoutMs = this.options.testTimeoutMs ?? 10000;
     await new Promise<void>((resolve, reject) => {
-      const req = https.get(testUrl, { agent: this.createAgent(node), timeout: timeoutMs }, (res) => {
+      const handle = this.createAgent(node);
+      const req = https.get(testUrl, { agent: handle.agent, timeout: timeoutMs }, (res) => {
         const statusCode = res.statusCode || 0;
         res.resume();
         res.on("error", reject);
@@ -515,7 +553,8 @@ export class ProxyPoolStore {
           reject(new Error(`Proxy test returned HTTP ${statusCode || "unknown"}`));
         });
       });
-      req.on("error", reject);
+      const connectTimeout = armProxyConnectTimeout(req, handle.connection);
+      req.on("error", (error) => reject(connectTimeout.getError() || error));
       req.on("timeout", () => {
         req.destroy(new Error(`Proxy test timeout after ${timeoutMs}ms`));
       });

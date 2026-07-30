@@ -291,6 +291,7 @@ ADMIN_PASSWORD=admin                    # 管理接口/控制台密码（务必�
 ZEN_HOST=opencode.ai                    # 上游主机
 ZEN_PATH=/zen/v1/chat/completions       # 上游路径
 UPSTREAM_TIMEOUT_MS=120000              # 上游超时
+PROXY_CONNECT_TIMEOUT_MS=5000           # 代理连接超时（TCP、代理协商和目标 TLS）
 GLOBAL_REQUESTS_PER_MINUTE=120          # 全局每分钟请求上限
 API_KEY_REQUESTS_PER_MINUTE=60          # 单 Key 每分钟请求上限
 API_KEY_MAX_CONCURRENT_REQUESTS=10      # 单 Key 并发请求上限
@@ -305,13 +306,14 @@ OUTBOUND_PRE_PROXY_URL=                 # 前置代理地址（http/https）
 REQUIRE_PROXY=false                     # 兼容旧配置；未设置 PROXY_MODE 时 true 等价于 required
 ```
 
-设置项中的 `upstreamTimeoutMs`、代理使用模式、前置代理开关与地址、代理自动同步开关与间隔等也可在运行时通过控制台或 `PATCH /admin/settings` **热更新**，无需重启。
+设置项中的 `upstreamTimeoutMs`、`proxyConnectTimeoutMs`、代理使用模式、前置代理开关与地址、代理自动同步开关与间隔等也可在运行时通过控制台或 `PATCH /admin/settings` **热更新**，无需重启。
 
 ## 出口代理与前置代理
 
 - 代理使用模式支持三种：`direct` 强制直连，`optional` 有可用代理则使用、否则直连，`required` 必须使用代理、无可用节点则失败。
 - 代理池节点正常情况下**直连**自己配置的代理 URL。
 - 选择策略为**优先填充**：按权重从高到低排序，持续使用第一个“启用、未冷却、未达每日上限、未达并发上限”的节点。
+- 每次代理请求默认有 5 秒连接预算，覆盖代理 TCP、HTTP `CONNECT`/SOCKS5 协商、代理认证和目标 TLS 握手；连接超时后节点进入 5 分钟冷却，并立即切换到本次尚未尝试的代理。该预算不限制模型生成时间。
 - 节点连续 5 次收到上游 429 会被自动禁用，需手动重新启用；其他失败会进入冷却（默认 5 分钟）。
 - 控制台支持手动清理失效代理：系统会通过固定工作队列（最多 10 个并发）访问 Cloudflare 的 `https://cp.cloudflare.com/generate_204`，检测全部节点能否访问公共互联网，仅删除检测失败且检测期间未被修改的节点。
 - SCDN 自动同步默认关闭。开启后会立即执行一次同步，之后按配置间隔运行；由于提供方单次最多返回 20 条，系统会分批请求并去重，只有累计到 100 个唯一地址后才更新代理池。每次手动或定时同步完成后，都会将代理池全部节点（包括手动新增和用户导入的节点）加入同一检测队列，并自动删除无法访问公共互联网的节点；控制台会实时显示等待、检测中、完成、失败和删除数量。

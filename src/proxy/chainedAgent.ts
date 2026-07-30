@@ -15,12 +15,18 @@ const readUntil = (socket: net.Socket, marker: Buffer): Promise<Buffer> => new P
     cleanup();
     reject(error);
   };
+  const onClose = () => {
+    cleanup();
+    reject(new Error("Proxy connection closed during handshake"));
+  };
   const cleanup = () => {
     socket.off("data", onData);
     socket.off("error", onError);
+    socket.off("close", onClose);
   };
   socket.on("data", onData);
   socket.on("error", onError);
+  socket.on("close", onClose);
 });
 
 const readN = (socket: net.Socket, length: number): Promise<Buffer> => new Promise((resolve, reject) => {
@@ -35,12 +41,18 @@ const readN = (socket: net.Socket, length: number): Promise<Buffer> => new Promi
     cleanup();
     reject(error);
   };
+  const onClose = () => {
+    cleanup();
+    reject(new Error("Proxy connection closed during handshake"));
+  };
   const cleanup = () => {
     socket.off("data", onData);
     socket.off("error", onError);
+    socket.off("close", onClose);
   };
   socket.on("data", onData);
   socket.on("error", onError);
+  socket.on("close", onClose);
 });
 
 const authHeader = (proxy: URL): string => {
@@ -50,15 +62,29 @@ const authHeader = (proxy: URL): string => {
   return `Proxy-Authorization: Basic ${Buffer.from(`${username}:${password}`).toString("base64")}\r\n`;
 };
 
-const connectToPreProxy = async (preProxy: URL, timeout: number): Promise<net.Socket> => {
+const connectToPreProxy = async (preProxy: URL, signal?: AbortSignal): Promise<net.Socket> => {
   const port = Number(preProxy.port || (preProxy.protocol === "https:" ? 443 : 80));
-  const rawSocket = net.connect(port, preProxy.hostname);
-  rawSocket.setTimeout(timeout);
+  const rawSocket = net.connect({
+    host: preProxy.hostname,
+    port,
+    signal,
+  });
 
   await new Promise<void>((resolve, reject) => {
-    rawSocket.once("connect", resolve);
-    rawSocket.once("error", reject);
-    rawSocket.once("timeout", () => reject(new Error("Pre-proxy connection timeout")));
+    const cleanup = () => {
+      rawSocket.off("connect", onConnect);
+      rawSocket.off("error", onError);
+    };
+    const onConnect = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    rawSocket.once("connect", onConnect);
+    rawSocket.once("error", onError);
   });
 
   if (preProxy.protocol !== "https:") return rawSocket;
@@ -78,7 +104,7 @@ const httpConnect = async (socket: net.Socket, host: string, port: number, proxy
 class ChainedAgentBase extends https.Agent {
   protected readonly preProxy: URL;
 
-  constructor(preProxyUrl: string) {
+  constructor(preProxyUrl: string, protected readonly connectSignal?: AbortSignal) {
     super({ keepAlive: false });
     this.preProxy = new URL(preProxyUrl);
     if (!["http:", "https:"].includes(this.preProxy.protocol)) throw new Error("Pre-proxy must use http:// or https://");
@@ -99,14 +125,14 @@ class ChainedAgentBase extends https.Agent {
 export class HttpPreProxyToSocksAgent extends ChainedAgentBase {
   private readonly socksProxy: URL;
 
-  constructor(preProxyUrl: string, socksProxyUrl: string) {
-    super(preProxyUrl);
+  constructor(preProxyUrl: string, socksProxyUrl: string, connectSignal?: AbortSignal) {
+    super(preProxyUrl, connectSignal);
     this.socksProxy = new URL(socksProxyUrl);
     if (!this.socksProxy.protocol.startsWith("socks")) throw new Error("Chained proxy target must be SOCKS");
   }
 
   protected override async createChainedConnection(options: any): Promise<net.Socket> {
-    const preProxySocket = await connectToPreProxy(this.preProxy, Number(options.timeout || 120000));
+    const preProxySocket = await connectToPreProxy(this.preProxy, this.connectSignal);
 
     const socksHost = this.socksProxy.hostname;
     const socksPort = Number(this.socksProxy.port || 1080);
@@ -135,14 +161,14 @@ export class HttpPreProxyToSocksAgent extends ChainedAgentBase {
 export class HttpPreProxyToHttpAgent extends ChainedAgentBase {
   private readonly httpProxy: URL;
 
-  constructor(preProxyUrl: string, httpProxyUrl: string) {
-    super(preProxyUrl);
+  constructor(preProxyUrl: string, httpProxyUrl: string, connectSignal?: AbortSignal) {
+    super(preProxyUrl, connectSignal);
     this.httpProxy = new URL(httpProxyUrl);
     if (!["http:", "https:"].includes(this.httpProxy.protocol)) throw new Error("Chained proxy target must be HTTP/HTTPS");
   }
 
   protected override async createChainedConnection(options: any): Promise<net.Socket> {
-    const preProxySocket = await connectToPreProxy(this.preProxy, Number(options.timeout || 120000));
+    const preProxySocket = await connectToPreProxy(this.preProxy, this.connectSignal);
     const proxyHost = this.httpProxy.hostname;
     const proxyPort = Number(this.httpProxy.port || (this.httpProxy.protocol === "https:" ? 443 : 80));
 

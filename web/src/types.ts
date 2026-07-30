@@ -35,6 +35,7 @@ export interface ModelItem {
 export interface SystemSettings {
   requestBodyLimitBytes: number;
   upstreamTimeoutMs: number;
+  proxyConnectTimeoutMs: number;
   defaultStream: boolean;
   logPrompts: boolean;
   openAiStreamTransformModels: string[];

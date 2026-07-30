@@ -41,6 +41,7 @@ export function SettingsView({ data }: { data: ConsoleData }) {
           <h2 className="text-sm font-semibold">网关参数</h2>
           <div className="mt-4 space-y-4">
             {numberField("上游超时（毫秒）", "upstreamTimeoutMs")}
+            {numberField("代理连接超时（毫秒）", "proxyConnectTimeoutMs")}
             {numberField("请求体限制（字节）", "requestBodyLimitBytes")}
             {toggleField("默认流式输出", "defaultStream")}
           </div>

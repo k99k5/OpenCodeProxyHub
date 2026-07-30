@@ -31,6 +31,23 @@ describe("ProxyPoolStore maintenance", () => {
     assert.equal(DEFAULT_PROXY_CONNECTIVITY_CHECK_URL.includes("opencode.ai"), false);
   });
 
+  test("uses a configurable five-second proxy connection timeout", () => {
+    const { settings } = createPool();
+    assert.equal(settings.get().proxyConnectTimeoutMs, 5000);
+    assert.equal(
+      settings.update({ proxyConnectTimeoutMs: 3000 }).proxyConnectTimeoutMs,
+      3000,
+    );
+    assert.throws(
+      () => settings.update({ proxyConnectTimeoutMs: 999 }),
+      /between 1000 and 60000/,
+    );
+    assert.throws(
+      () => settings.update({ proxyConnectTimeoutMs: 60001 }),
+      /between 1000 and 60000/,
+    );
+  });
+
   test("source sync replaces only stale nodes from the same source", () => {
     const { pool } = createPool();
     const manual = pool.create({ name: "manual", url: "http://manual.example:8080" });
