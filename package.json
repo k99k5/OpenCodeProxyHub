@@ -12,6 +12,7 @@
     "build:web": "npm --prefix web run build",
     "build:all": "npm run build && npm run build:web",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
     "smoke:protocol": "node scripts/protocol-smoke.mjs",
     "smoke:load": "node scripts/load-smoke.mjs",
     "check:stability": "node scripts/stability-check.mjs"

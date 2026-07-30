@@ -9,6 +9,7 @@ import type {
   ModelItem,
   ProxyDraft,
   ProxyNode,
+  ProxySyncStatus,
   RuntimePayload,
   SystemSettings,
 } from "../types";
@@ -33,6 +34,7 @@ export function useConsoleData() {
   const [models, setModels] = useState<ModelItem[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [proxies, setProxies] = useState<ProxyNode[]>([]);
+  const [proxySyncStatus, setProxySyncStatus] = useState<ProxySyncStatus | null>(null);
   const [runtime, setRuntime] = useState<RuntimePayload | null>(null);
   const [metricsData, setMetricsData] = useState<MetricsPayload | null>(null);
 
@@ -57,6 +59,7 @@ export function useConsoleData() {
     setApiKeys([]);
     setSettings(null);
     setProxies([]);
+    setProxySyncStatus(null);
     setRuntime(null);
     setMetricsData(null);
     pushToast(message, "info");
@@ -72,11 +75,12 @@ export function useConsoleData() {
       setHealth(healthData);
       if (!activeToken) return;
 
-      const [keysData, modelsData, settingsData, proxiesData, runtimeData, metricsResult] = await Promise.all([
+      const [keysData, modelsData, settingsData, proxiesData, proxySyncData, runtimeData, metricsResult] = await Promise.all([
         apiFetch<{ data: ApiKeyItem[] }>("/admin/api-keys", activeToken),
         apiFetch<{ data: ModelItem[] }>("/admin/models", activeToken),
         apiFetch<{ data: SystemSettings }>("/admin/settings", activeToken),
         apiFetch<{ data: ProxyNode[] }>("/admin/proxies", activeToken),
+        apiFetch<{ data: ProxySyncStatus }>("/admin/proxy-sync", activeToken),
         apiFetch<{ data: RuntimePayload }>("/admin/runtime", activeToken),
         apiFetch<{ data: MetricsPayload }>("/admin/metrics", activeToken),
       ]);
@@ -84,6 +88,7 @@ export function useConsoleData() {
       setModels(modelsData.data);
       setSettings(settingsData.data);
       setProxies(proxiesData.data);
+      setProxySyncStatus(proxySyncData.data);
       setRuntime(runtimeData.data);
       setMetricsData(metricsResult.data);
       if (!modelsData.data.length && Array.isArray(publicModels.data)) {
@@ -274,6 +279,39 @@ export function useConsoleData() {
       },
     );
 
+  const syncProxies = () =>
+    run(
+      async () => {
+        const response = await apiFetch<{ data: { result: ProxySyncStatus["lastResult"]; status: ProxySyncStatus } }>(
+          "/admin/proxies/sync",
+          token,
+          { method: "POST" },
+        );
+        setProxySyncStatus(response.data.status);
+        const result = response.data.result;
+        if (!result) throw new Error("代理同步未返回结果");
+        pushToast(
+          `已同步 ${result.received} 个代理：新增 ${result.created}，保留 ${result.retained}，移除 ${result.removed}`,
+          "success",
+        );
+      },
+    );
+
+  const cleanupInvalidProxies = () =>
+    run(
+      async () => {
+        const response = await apiFetch<{ data: { tested: number; deleted: number; remaining: number } }>(
+          "/admin/proxies/cleanup-invalid",
+          token,
+          { method: "POST" },
+        );
+        pushToast(
+          `已检测 ${response.data.tested} 个代理，清理 ${response.data.deleted} 个失效节点，剩余 ${response.data.remaining} 个`,
+          "success",
+        );
+      },
+    );
+
   const refresh = () => run(async () => undefined, { successText: "已刷新数据" });
 
   return {
@@ -288,6 +326,7 @@ export function useConsoleData() {
     models,
     settings,
     proxies,
+    proxySyncStatus,
     runtime,
     metricsData,
     busy,
@@ -318,6 +357,8 @@ export function useConsoleData() {
     testProxy,
     deleteProxy,
     clearProxies,
+    syncProxies,
+    cleanupInvalidProxies,
     refresh,
   };
 }

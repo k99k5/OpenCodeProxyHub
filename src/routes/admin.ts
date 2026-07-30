@@ -5,6 +5,7 @@ import { adminAuthMode, isAdminRequest } from "../auth/adminAuth.js";
 import type { ModelConfigStore, ModelUpdateInput } from "../models/catalog.js";
 import type { SettingsStore, SystemSettingsUpdate } from "../settings/settingsStore.js";
 import type { ProxyInput, ProxyPoolStore } from "../proxy/proxyPool.js";
+import type { ProxySyncService } from "../proxy/proxySync.js";
 import type { AsyncLimiter } from "../rateLimit/limiter.js";
 import type { RequestTracker } from "../runtime/requestTracker.js";
 import type { MetricsStore } from "../observability/metrics.js";
@@ -33,6 +34,7 @@ export const registerAdminRoutes = async (
   modelStore: ModelConfigStore,
   settingsStore: SettingsStore,
   proxyPool: ProxyPoolStore,
+  proxySync: ProxySyncService,
   limiter: AsyncLimiter,
   requestTracker: RequestTracker,
   metrics: MetricsStore,
@@ -135,6 +137,7 @@ export const registerAdminRoutes = async (
   app.patch<{ Body: SystemSettingsUpdate }>("/admin/settings", async (request, reply) => {
     try {
       const settings = settingsStore.update(request.body || {});
+      proxySync.reconfigure();
       audit(request, "settings.update", "success", { keys: Object.keys(request.body || {}) });
       return reply.send({ data: settings });
     } catch (error) {
@@ -145,6 +148,7 @@ export const registerAdminRoutes = async (
   });
 
   app.get("/admin/proxies", async () => ({ data: proxyPool.list() }));
+  app.get("/admin/proxy-sync", async () => ({ data: proxySync.getStatus() }));
 
   app.get("/admin/runtime", async () => ({
     data: {
@@ -180,6 +184,40 @@ export const registerAdminRoutes = async (
       const message = error instanceof Error ? error.message : "Failed to import proxies";
       audit(request, "proxy.import", "failure", { error: message });
       return reply.code(400).send({ error: { message } });
+    }
+  });
+
+  app.post("/admin/proxies/sync", async (request, reply) => {
+    try {
+      const result = await proxySync.syncNow();
+      audit(request, "proxy.sync", "success", {
+        received: result.received,
+        created: result.created,
+        retained: result.retained,
+        removed: result.removed,
+        batches: result.batches,
+      });
+      return reply.send({ data: { result, status: proxySync.getStatus() } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to sync proxies";
+      audit(request, "proxy.sync", "failure", { error: message });
+      return reply.code(502).send({ error: { message } });
+    }
+  });
+
+  app.post("/admin/proxies/cleanup-invalid", async (request, reply) => {
+    try {
+      const result = await proxyPool.cleanupInvalid();
+      audit(request, "proxy.cleanup_invalid", "success", {
+        tested: result.tested,
+        deleted: result.deleted,
+        remaining: result.remaining,
+      });
+      return reply.send({ data: result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to clean invalid proxies";
+      audit(request, "proxy.cleanup_invalid", "failure", { error: message });
+      return reply.code(500).send({ error: { message } });
     }
   });
 

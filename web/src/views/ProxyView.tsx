@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { AlertTriangle, Check, CheckCircle2, Download, FileUp, Network, Plus, Route, Trash2, Waypoints } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, Download, FileUp, Network, Plus, RefreshCw, Route, ShieldCheck, Trash2, Waypoints } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -35,10 +35,25 @@ const VIRTUAL_ROW_HEIGHT = 390;
 const VIRTUAL_OVERSCAN = 3;
 
 export function ProxyView({ data }: { data: ConsoleData }) {
-  const { proxies, settings, busy, createProxy, importProxies, toggleProxy, testProxy, deleteProxy, clearProxies, updateSettings } = data;
+  const {
+    proxies,
+    settings,
+    proxySyncStatus,
+    busy,
+    createProxy,
+    importProxies,
+    toggleProxy,
+    testProxy,
+    deleteProxy,
+    clearProxies,
+    syncProxies,
+    cleanupInvalidProxies,
+    updateSettings,
+  } = data;
   const [draft, setDraft] = useState<ProxyDraft>({ name: "香港节点 1", type: "http", url: "", dailyRequestLimit: 1000, maxConcurrency: 10 });
   const [deleteTarget, setDeleteTarget] = useState<ProxyNode | null>(null);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const [importFileName, setImportFileName] = useState("");
@@ -70,6 +85,11 @@ export function ProxyView({ data }: { data: ConsoleData }) {
     setPreProxyDraft(settings?.outboundPreProxyUrl ?? "");
   }, [settings?.outboundPreProxyUrl]);
   const preProxyDirty = preProxyDraft.trim() !== (settings?.outboundPreProxyUrl ?? "");
+  const [syncIntervalDraft, setSyncIntervalDraft] = useState(60);
+  useEffect(() => {
+    setSyncIntervalDraft(settings?.proxyAutoSyncIntervalMinutes ?? 60);
+  }, [settings?.proxyAutoSyncIntervalMinutes]);
+  const syncIntervalDirty = syncIntervalDraft !== (settings?.proxyAutoSyncIntervalMinutes ?? 60);
 
   const prioritized = useMemo(() => {
     const now = Date.now();
@@ -147,6 +167,78 @@ export function ProxyView({ data }: { data: ConsoleData }) {
               </button>
             );
           })}
+        </div>
+      </Card>
+
+      <Card className="p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <RefreshCw size={16} className="text-primary" />
+              <h2 className="text-sm font-semibold">代理自动维护</h2>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步时只替换该来源的旧节点，手动添加的节点不受影响。
+            </p>
+          </div>
+          <Switch
+            disabled={busy || !settings}
+            checked={Boolean(settings?.proxyAutoSyncEnabled)}
+            onCheckedChange={(enabled) => updateSettings({ proxyAutoSyncEnabled: enabled })}
+          />
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[minmax(180px,260px)_1fr]">
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground">同步间隔（分钟）</Label>
+            <div className="flex gap-2">
+              <Input
+                type="number"
+                min={1}
+                max={10080}
+                value={syncIntervalDraft}
+                disabled={busy || !settings}
+                onChange={(event) => setSyncIntervalDraft(Number(event.target.value))}
+              />
+              <Button
+                size="sm"
+                disabled={busy || !settings || !syncIntervalDirty || syncIntervalDraft < 1 || syncIntervalDraft > 10080}
+                onClick={() => updateSettings({ proxyAutoSyncIntervalMinutes: syncIntervalDraft })}
+              >
+                保存
+              </Button>
+            </div>
+          </div>
+          <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+            <div>
+              上次成功：
+              <span className="ml-1 text-foreground">
+                {proxySyncStatus?.lastSuccessAt ? new Date(proxySyncStatus.lastSuccessAt).toLocaleString() : "尚未同步"}
+              </span>
+            </div>
+            {proxySyncStatus?.lastResult && (
+              <div className="mt-1">
+                获取 {proxySyncStatus.lastResult.received} · 新增 {proxySyncStatus.lastResult.created} ·
+                保留 {proxySyncStatus.lastResult.retained} · 移除 {proxySyncStatus.lastResult.removed}
+              </div>
+            )}
+            {proxySyncStatus?.lastError && <div className="mt-1 text-destructive">上次错误：{proxySyncStatus.lastError}</div>}
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => syncProxies()}>
+            <RefreshCw size={16} /> 立即同步 100 个
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-destructive hover:text-destructive"
+            disabled={busy || proxies.length === 0}
+            onClick={() => setCleanupConfirmOpen(true)}
+          >
+            <ShieldCheck size={16} /> 清理失效代理
+          </Button>
         </div>
       </Card>
 
@@ -299,6 +391,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
                     <div className="flex items-center gap-2">
                       <strong className="truncate">{proxy.name}</strong>
                       <Badge variant="outline" className="uppercase">{proxy.type}</Badge>
+                      {proxy.source && <Badge variant="muted">自动同步</Badge>}
                     </div>
                     <p className="mt-1 truncate text-xs text-muted-foreground">{proxy.url}</p>
                   </div>
@@ -384,6 +477,19 @@ export function ProxyView({ data }: { data: ConsoleData }) {
         onConfirm={() => {
           if (deleteTarget) deleteProxy(deleteTarget);
           setDeleteTarget(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={cleanupConfirmOpen}
+        title="清理失效代理"
+        message={`将并发检测全部 ${proxies.length} 个代理，并永久删除无法连接 OpenCode 的节点。检测可能需要一段时间，是否继续？`}
+        confirmText="检测并清理"
+        busy={busy}
+        onCancel={() => setCleanupConfirmOpen(false)}
+        onConfirm={async () => {
+          const cleaned = await cleanupInvalidProxies();
+          if (cleaned) setCleanupConfirmOpen(false);
         }}
       />
 

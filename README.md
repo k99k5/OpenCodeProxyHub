@@ -270,7 +270,7 @@ curl http://127.0.0.1:6446/v1/messages \
 - **API Keys**：创建（明文显示一次并可复制）、启用/禁用、删除、备注与标签、每 Key 策略（RPM、并发、模型白名单、是否允许代理）、查看请求量与最近客户端
 - **模型**：启用/禁用模型，按模型开启 `anthropic-sse-to-openai` 与 `think-to-reasoning` 两种流式转换
 - **设置**：上游超时、请求体限制、默认流式、文件日志与审计开关、Prompt 记录、日志正文上限与保留天数
-- **代理池**：新增/编辑/删除/测试节点，查看优先节点、成功率、近 N 次请求结果色条、用量/并发/连续 429 仪表，切换代理使用模式，开关与配置链式前置代理（热重载）
+- **代理池**：新增/编辑/删除/测试节点，批量清理失效节点，从 SCDN 手动或定时同步 100 个 HTTP 代理，查看优先节点、成功率、近 N 次请求结果色条、用量/并发/连续 429 仪表，切换代理使用模式，开关与配置链式前置代理（热重载）
 - **监控**：HTTP/上游请求量、错误率、延迟分位、状态码与路由分布、限流器后端、运行时长、最近错误
 
 控制台密码或开发 API Key 保存在浏览器本地存储中。
@@ -305,7 +305,7 @@ OUTBOUND_PRE_PROXY_URL=                 # 前置代理地址（http/https）
 REQUIRE_PROXY=false                     # 兼容旧配置；未设置 PROXY_MODE 时 true 等价于 required
 ```
 
-设置项中的 `upstreamTimeoutMs`、代理使用模式、前置代理开关与地址等也可在运行时通过控制台或 `PATCH /admin/settings` **热更新**，无需重启。
+设置项中的 `upstreamTimeoutMs`、代理使用模式、前置代理开关与地址、代理自动同步开关与间隔等也可在运行时通过控制台或 `PATCH /admin/settings` **热更新**，无需重启。
 
 ## 出口代理与前置代理
 
@@ -313,6 +313,9 @@ REQUIRE_PROXY=false                     # 兼容旧配置；未设置 PROXY_MODE
 - 代理池节点正常情况下**直连**自己配置的代理 URL。
 - 选择策略为**优先填充**：按权重从高到低排序，持续使用第一个“启用、未冷却、未达每日上限、未达并发上限”的节点。
 - 节点连续 5 次收到上游 429 会被自动禁用，需手动重新启用；其他失败会进入冷却（默认 5 分钟）。
+- 控制台支持手动清理失效代理：系统会并发检测全部节点能否连接 `https://opencode.ai/`，仅删除检测失败且检测期间未被修改的节点。
+- SCDN 自动同步默认关闭。开启后会立即执行一次同步，之后按配置间隔运行；由于提供方单次最多返回 20 条，系统会分批请求并去重，只有累计到 100 个唯一地址后才更新代理池。
+- 自动同步只替换来源标记为 SCDN 的旧节点，手动新增或导入的节点会保留。同步未取得 100 个唯一地址时，本次同步失败，现有 SCDN 节点保持不变。
 - 若节点无法直连、需要先经本机代理出网，可启用**链式前置代理**：
 
 ```text
@@ -346,6 +349,10 @@ GET    /admin/settings           # 读取系统设置
 PATCH  /admin/settings           # 更新系统设置（热生效）
 GET    /admin/proxies            # 列出代理节点
 POST   /admin/proxies            # 新增代理节点
+POST   /admin/proxies/import     # 批量导入代理节点
+POST   /admin/proxies/sync       # 立即从 SCDN 同步 100 个 HTTP 代理
+POST   /admin/proxies/cleanup-invalid # 检测并删除失效代理
+GET    /admin/proxy-sync         # 自动同步配置与运行状态
 PATCH  /admin/proxies/:id        # 更新代理节点
 DELETE /admin/proxies/:id        # 删除代理节点
 POST   /admin/proxies/:id/test   # 测试代理连通性
@@ -442,4 +449,3 @@ OpenCodeProxyHub 独立维护，与 OpenCode、`opencode-free-proxy` 及任何�
 - **v0.1.0**：初始发布
 
 完整变更记录见 Git 提交历史。
-
