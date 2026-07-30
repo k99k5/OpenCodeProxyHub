@@ -90,6 +90,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
     setSyncIntervalDraft(settings?.proxyAutoSyncIntervalMinutes ?? 60);
   }, [settings?.proxyAutoSyncIntervalMinutes]);
   const syncIntervalDirty = syncIntervalDraft !== (settings?.proxyAutoSyncIntervalMinutes ?? 60);
+  const cleanupQueue = proxySyncStatus?.cleanupQueue;
 
   const prioritized = useMemo(() => {
     const now = Date.now();
@@ -178,7 +179,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
               <h2 className="text-sm font-semibold">代理自动维护</h2>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步时只替换该来源的旧节点，手动添加的节点不受影响。
+              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步后自动将全部节点加入检测队列，无法访问公共互联网的节点会被清理。
             </p>
           </div>
           <Switch
@@ -219,10 +220,41 @@ export function ProxyView({ data }: { data: ConsoleData }) {
             {proxySyncStatus?.lastResult && (
               <div className="mt-1">
                 获取 {proxySyncStatus.lastResult.received} · 新增 {proxySyncStatus.lastResult.created} ·
-                保留 {proxySyncStatus.lastResult.retained} · 移除 {proxySyncStatus.lastResult.removed}
+                保留 {proxySyncStatus.lastResult.retained} · 同步移除 {proxySyncStatus.lastResult.removed}
+                <br />
+                队列检测 {proxySyncStatus.lastResult.cleanup.tested} · 自动清理 {proxySyncStatus.lastResult.cleanup.deleted} ·
+                剩余 {proxySyncStatus.lastResult.cleanup.remaining}
               </div>
             )}
             {proxySyncStatus?.lastError && <div className="mt-1 text-destructive">上次错误：{proxySyncStatus.lastError}</div>}
+            <div className="mt-3 border-t border-border pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-foreground">检测队列</span>
+                <Badge variant={cleanupQueue?.running || proxySyncStatus?.running ? "info" : cleanupQueue?.completedAt ? "success" : "muted"}>
+                  {cleanupQueue?.running
+                    ? "运行中"
+                    : proxySyncStatus?.running
+                      ? "等待同步完成"
+                      : cleanupQueue?.completedAt
+                        ? "已完成"
+                        : "尚未运行"}
+                </Badge>
+                <span>Worker {cleanupQueue?.checking ?? 0}/{cleanupQueue?.concurrency ?? 10}</span>
+              </div>
+              {proxySyncStatus?.running && !cleanupQueue?.running ? (
+                <div className="mt-2">正在获取代理，完成后会将整个代理池加入检测队列。</div>
+              ) : (
+                <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                  <span>总数 {cleanupQueue?.total ?? 0}</span>
+                  <span>等待 {cleanupQueue?.queued ?? 0}</span>
+                  <span>检测中 {cleanupQueue?.checking ?? 0}</span>
+                  <span>已完成 {cleanupQueue?.completed ?? 0}</span>
+                  <span>成功 {cleanupQueue?.succeeded ?? 0}</span>
+                  <span>失败 {cleanupQueue?.failed ?? 0}</span>
+                  <span>已删除 {cleanupQueue?.deleted ?? 0}</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -483,7 +515,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
       <ConfirmDialog
         open={cleanupConfirmOpen}
         title="清理失效代理"
-        message={`将并发检测全部 ${proxies.length} 个代理，并永久删除无法连接 OpenCode 的节点。检测可能需要一段时间，是否继续？`}
+        message={`将按队列检测全部 ${proxies.length} 个代理（最多 10 个同时检测），并永久删除无法访问公共互联网的节点。检测可能需要一段时间，是否继续？`}
         confirmText="检测并清理"
         busy={busy}
         onCancel={() => setCleanupConfirmOpen(false)}

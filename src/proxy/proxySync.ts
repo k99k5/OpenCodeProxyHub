@@ -1,4 +1,10 @@
-import type { ProxySourceSyncResult, ProxyPoolStore } from "./proxyPool.js";
+import {
+  DEFAULT_PROXY_CHECK_CONCURRENCY,
+  type ProxyCleanupResult,
+  type ProxyCleanupQueueStatus,
+  type ProxySourceSyncResult,
+  type ProxyPoolStore,
+} from "./proxyPool.js";
 import type { SettingsStore } from "../settings/settingsStore.js";
 
 export const SCDN_PROXY_SOURCE = "scdn-http";
@@ -12,6 +18,7 @@ const MAX_PARALLEL_BATCHES = 5;
 
 export interface ProxySyncRunResult extends ProxySourceSyncResult {
   batches: number;
+  cleanup: ProxyCleanupResult;
 }
 
 export interface ProxySyncStatus {
@@ -26,6 +33,7 @@ export interface ProxySyncStatus {
   lastSuccessAt: string | null;
   lastError: string | null;
   lastResult: ProxySyncRunResult | null;
+  cleanupQueue: ProxyCleanupQueueStatus;
 }
 
 interface ProxySyncLogger {
@@ -41,6 +49,7 @@ export interface ProxySyncOptions {
   batchSize?: number;
   maxBatches?: number;
   requestTimeoutMs?: number;
+  cleanupConcurrency?: number;
 }
 
 export class ProxySyncService {
@@ -51,6 +60,7 @@ export class ProxySyncService {
   private readonly batchSize: number;
   private readonly maxBatches: number;
   private readonly requestTimeoutMs: number;
+  private readonly cleanupConcurrency: number;
   private started = false;
   private enabled = false;
   private timer: NodeJS.Timeout | null = null;
@@ -75,6 +85,7 @@ export class ProxySyncService {
     this.batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
     this.maxBatches = options.maxBatches ?? DEFAULT_MAX_BATCHES;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.cleanupConcurrency = options.cleanupConcurrency ?? DEFAULT_PROXY_CHECK_CONCURRENCY;
   }
 
   start(): void {
@@ -114,7 +125,14 @@ export class ProxySyncService {
       lastCompletedAt: this.lastCompletedAt,
       lastSuccessAt: this.lastSuccessAt,
       lastError: this.lastError,
-      lastResult: this.lastResult ? { ...this.lastResult } : null,
+      lastResult: this.lastResult ? {
+        ...this.lastResult,
+        cleanup: {
+          ...this.lastResult.cleanup,
+          failures: this.lastResult.cleanup.failures.map((failure) => ({ ...failure })),
+        },
+      } : null,
+      cleanupQueue: this.proxyPool.getCleanupQueueStatus(),
     };
   }
 
@@ -138,6 +156,9 @@ export class ProxySyncService {
         created: result.created,
         retained: result.retained,
         removed: result.removed,
+        cleanupTested: result.cleanup.tested,
+        cleanupDeleted: result.cleanup.deleted,
+        remaining: result.cleanup.remaining,
       }, "proxy_sync_completed");
       return result;
     } catch (error) {
@@ -154,13 +175,18 @@ export class ProxySyncService {
   }
 
   private async performSync(): Promise<ProxySyncRunResult> {
+    const { addresses, batches } = await this.fetchAddressesWithTimeout();
+    const result = this.proxyPool.syncSource(SCDN_PROXY_SOURCE, addresses);
+    const cleanup = await this.proxyPool.cleanupInvalid(this.cleanupConcurrency);
+    return { ...result, total: cleanup.remaining, batches, cleanup };
+  }
+
+  private async fetchAddressesWithTimeout(): Promise<{ addresses: string[]; batches: number }> {
     const controller = new AbortController();
     this.activeController = controller;
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     try {
-      const { addresses, batches } = await this.fetchAddresses(controller.signal);
-      const result = this.proxyPool.syncSource(SCDN_PROXY_SOURCE, addresses);
-      return { ...result, batches };
+      return await this.fetchAddresses(controller.signal);
     } catch (error) {
       if (controller.signal.aborted) {
         throw new Error(`Proxy sync timed out after ${this.requestTimeoutMs}ms`);
@@ -168,6 +194,7 @@ export class ProxySyncService {
       throw error;
     } finally {
       clearTimeout(timeout);
+      this.activeController = null;
     }
   }
 

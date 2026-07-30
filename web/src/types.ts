@@ -83,6 +83,33 @@ export interface ProxySyncRunResult {
   removed: number;
   total: number;
   batches: number;
+  cleanup: ProxyCleanupResult;
+}
+
+export interface ProxyCleanupResult {
+  tested: number;
+  deleted: number;
+  remaining: number;
+  failures: Array<{
+    id: string;
+    name: string;
+    error: string;
+  }>;
+}
+
+export interface ProxyCleanupQueueStatus {
+  running: boolean;
+  total: number;
+  queued: number;
+  checking: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  deleted: number;
+  remaining: number;
+  concurrency: number;
+  startedAt: string | null;
+  completedAt: string | null;
 }
 
 export interface ProxySyncStatus {
@@ -97,6 +124,7 @@ export interface ProxySyncStatus {
   lastSuccessAt: string | null;
   lastError: string | null;
   lastResult: ProxySyncRunResult | null;
+  cleanupQueue: ProxyCleanupQueueStatus;
 }
 
 export interface HealthPayload {

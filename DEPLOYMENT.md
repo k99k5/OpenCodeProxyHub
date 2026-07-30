@@ -144,11 +144,11 @@ Proxy selection uses priority fill. The first available enabled node is used unt
 
 The proxy console also supports:
 
-- checking every configured proxy against `https://opencode.ai/` and deleting failed nodes
+- checking every configured proxy through a bounded worker queue (at most 10 concurrent checks) against Cloudflare's `https://cp.cloudflare.com/generate_204` connectivity endpoint and deleting nodes that cannot access the public internet
 - manually synchronizing 100 unique HTTP proxies from SCDN
 - enabling scheduled SCDN synchronization with a configurable interval
 
-The SCDN endpoint returns at most 20 proxies per request, so one synchronization uses multiple batches and updates the SCDN-managed set only after collecting 100 unique addresses. Manually managed proxies are preserved.
+The SCDN endpoint returns at most 20 proxies per request, so one synchronization uses multiple batches and updates the SCDN-managed set only after collecting 100 unique addresses. After every manual or scheduled synchronization, all nodes in the proxy pool are queued for connectivity checks and unreachable nodes are automatically deleted. Manually managed proxies are preserved during source replacement, but are included in the post-sync connectivity check.
 
 ## Upgrade
 

@@ -196,6 +196,9 @@ export const registerAdminRoutes = async (
         retained: result.retained,
         removed: result.removed,
         batches: result.batches,
+        cleanupTested: result.cleanup.tested,
+        cleanupDeleted: result.cleanup.deleted,
+        remaining: result.cleanup.remaining,
       });
       return reply.send({ data: { result, status: proxySync.getStatus() } });
     } catch (error) {
