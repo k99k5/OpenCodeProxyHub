@@ -24,6 +24,7 @@ export interface ZenRequestInput {
   tools?: unknown[];
   toolChoice?: unknown;
   parameters?: Record<string, unknown>;
+  promptCacheKey?: string;
   sessionId: string;
 }
 
@@ -240,6 +241,8 @@ export const prepareZenRequest = (
   };
   if (input.tools?.length) requestBody.tools = input.tools;
   if (input.toolChoice) requestBody.tool_choice = input.toolChoice;
+  if (input.promptCacheKey !== undefined)
+    requestBody.prompt_cache_key = input.promptCacheKey;
   for (const [key, value] of Object.entries(input.parameters || {})) {
     if (value !== undefined) requestBody[key] = value;
   }
