@@ -64,6 +64,8 @@ export function ProxyView({ data }: { data: ConsoleData }) {
   const [listHeight, setListHeight] = useState(720);
   const [listWidth, setListWidth] = useState(0);
   const hasProxies = proxies.length > 0;
+  const enabledProxyCount = proxies.filter((proxy) => proxy.enabled).length;
+  const disabledProxyCount = proxies.length - enabledProxyCount;
 
   useEffect(() => {
     const element = listRef.current;
@@ -179,7 +181,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
               <h2 className="text-sm font-semibold">代理自动维护</h2>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步后自动将全部节点加入检测队列，无法访问公共互联网的节点会被清理。
+              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步后直接清理已禁用节点，其余节点加入公网检测队列。
             </p>
           </div>
           <Switch
@@ -242,7 +244,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
                 <span>Worker {cleanupQueue?.checking ?? 0}/{cleanupQueue?.concurrency ?? 10}</span>
               </div>
               {proxySyncStatus?.running && !cleanupQueue?.running ? (
-                <div className="mt-2">正在获取代理，完成后会将整个代理池加入检测队列。</div>
+                <div className="mt-2">正在获取代理，完成后会直接清理已禁用节点，并将其余节点加入检测队列。</div>
               ) : (
                 <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
                   <span>总数 {cleanupQueue?.total ?? 0}</span>
@@ -515,7 +517,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
       <ConfirmDialog
         open={cleanupConfirmOpen}
         title="清理失效代理"
-        message={`将按队列检测全部 ${proxies.length} 个代理（最多 10 个同时检测），并永久删除无法访问公共互联网的节点。检测可能需要一段时间，是否继续？`}
+        message={`将直接删除 ${disabledProxyCount} 个已禁用代理，并按队列检测其余 ${enabledProxyCount} 个已启用代理（最多 10 个同时检测）；无法访问公共互联网的节点也会永久删除。是否继续？`}
         confirmText="检测并清理"
         busy={busy}
         onCancel={() => setCleanupConfirmOpen(false)}

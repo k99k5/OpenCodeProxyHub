@@ -72,7 +72,7 @@ describe("ProxyPoolStore maintenance", () => {
     assert.equal(nodes.some((node) => node.url === "http://10.0.0.1:80"), false);
   });
 
-  test("cleanup probes every node and deletes only failed unchanged nodes", async () => {
+  test("cleanup probes every enabled node and deletes only failed unchanged nodes", async () => {
     const { pool } = createPool(async (node) => {
       if (node.url.includes("dead.example")) throw new Error("connection refused");
     });
@@ -98,6 +98,85 @@ describe("ProxyPoolStore maintenance", () => {
       },
       { running: false, total: 2, completed: 2, succeeded: 1, failed: 1, deleted: 1 },
     );
+  });
+
+  test("cleanup deletes disabled nodes without probing them", async () => {
+    const probed: string[] = [];
+    const { pool } = createPool(async (node) => {
+      probed.push(node.name);
+    });
+    pool.create({ name: "healthy", url: "http://healthy.example:8080" });
+    pool.create({
+      name: "disabled",
+      url: "http://disabled.example:8080",
+      enabled: false,
+    });
+
+    const result = await pool.cleanupInvalid(2);
+
+    assert.deepEqual(probed, ["healthy"]);
+    assert.deepEqual(result, {
+      tested: 1,
+      deleted: 1,
+      remaining: 1,
+      failures: [],
+    });
+    assert.deepEqual(pool.list().map((node) => node.name), ["healthy"]);
+    assert.deepEqual(
+      {
+        total: pool.getCleanupQueueStatus().total,
+        completed: pool.getCleanupQueueStatus().completed,
+        succeeded: pool.getCleanupQueueStatus().succeeded,
+        failed: pool.getCleanupQueueStatus().failed,
+        deleted: pool.getCleanupQueueStatus().deleted,
+      },
+      { total: 1, completed: 1, succeeded: 1, failed: 0, deleted: 1 },
+    );
+  });
+
+  test("cleanup completes without workers when every node is disabled", async () => {
+    const { pool } = createPool(async () => {
+      throw new Error("disabled nodes must not be probed");
+    });
+    pool.create({
+      name: "disabled-1",
+      url: "http://disabled-1.example:8080",
+      enabled: false,
+    });
+    pool.create({
+      name: "disabled-2",
+      url: "http://disabled-2.example:8080",
+      enabled: false,
+    });
+
+    const result = await pool.cleanupInvalid(2);
+    const status = pool.getCleanupQueueStatus();
+
+    assert.deepEqual(result, {
+      tested: 0,
+      deleted: 2,
+      remaining: 0,
+      failures: [],
+    });
+    assert.deepEqual(
+      {
+        running: status.running,
+        total: status.total,
+        queued: status.queued,
+        completed: status.completed,
+        deleted: status.deleted,
+        concurrency: status.concurrency,
+      },
+      {
+        running: false,
+        total: 0,
+        queued: 0,
+        completed: 0,
+        deleted: 2,
+        concurrency: 0,
+      },
+    );
+    assert.ok(status.completedAt);
   });
 
   test("reports live bounded-worker queue status", async () => {
@@ -181,10 +260,12 @@ describe("ProxySyncService", () => {
     );
   });
 
-  test("queues provider and user-imported nodes after sync and automatically deletes failures", async () => {
+  test("queues enabled provider and user-imported nodes after sync and directly deletes disabled nodes", async () => {
     let activeChecks = 0;
     let maxActiveChecks = 0;
+    const checkedUrls: string[] = [];
     const { pool, settings } = createPool(async (node) => {
+      checkedUrls.push(node.url);
       activeChecks += 1;
       maxActiveChecks = Math.max(maxActiveChecks, activeChecks);
       try {
@@ -196,10 +277,16 @@ describe("ProxySyncService", () => {
         activeChecks -= 1;
       }
     });
-    pool.import([
+    const imported = pool.import([
       "manual-healthy.example:8080",
       "manual-dead.example:8080",
+      "manual-disabled.example:8080",
     ]);
+    const disabled = imported.created.find(
+      (node) => node.url === "http://manual-disabled.example:8080",
+    );
+    assert.ok(disabled);
+    pool.update(disabled.id, { enabled: false });
 
     const fetchImpl = async () => new Response(
       JSON.stringify({
@@ -228,12 +315,14 @@ describe("ProxySyncService", () => {
     const result = await service.syncNow();
 
     assert.equal(result.cleanup.tested, 6);
-    assert.equal(result.cleanup.deleted, 2);
+    assert.equal(result.cleanup.deleted, 3);
     assert.equal(result.cleanup.remaining, 4);
     assert.equal(result.total, 4);
     assert.equal(maxActiveChecks, 2);
+    assert.equal(checkedUrls.includes("http://manual-disabled.example:8080"), false);
     assert.equal(pool.list().some((node) => node.url === "http://manual-healthy.example:8080"), true);
     assert.equal(pool.list().some((node) => node.url === "http://manual-dead.example:8080"), false);
+    assert.equal(pool.list().some((node) => node.url === "http://manual-disabled.example:8080"), false);
     assert.equal(pool.list().some((node) => node.url === "http://10.0.0.2:8080"), false);
     assert.deepEqual(
       {

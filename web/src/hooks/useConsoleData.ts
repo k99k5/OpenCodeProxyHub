@@ -325,7 +325,7 @@ export function useConsoleData() {
         const result = response.data.result;
         if (!result) throw new Error("代理同步未返回结果");
         pushToast(
-          `已同步 ${result.received} 个代理；队列检测 ${result.cleanup.tested} 个，自动清理 ${result.cleanup.deleted} 个失效节点`,
+          `已同步 ${result.received} 个代理；队列检测 ${result.cleanup.tested} 个，自动清理 ${result.cleanup.deleted} 个节点`,
           "success",
         );
       },
@@ -340,7 +340,7 @@ export function useConsoleData() {
           { method: "POST" },
         );
         pushToast(
-          `已检测 ${response.data.tested} 个代理，清理 ${response.data.deleted} 个失效节点，剩余 ${response.data.remaining} 个`,
+          `已检测 ${response.data.tested} 个代理，清理 ${response.data.deleted} 个节点，剩余 ${response.data.remaining} 个`,
           "success",
         );
       },
