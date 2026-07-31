@@ -250,7 +250,7 @@ export const prepareZenRequest = (
 
   const body = JSON.stringify(requestBody);
   const requestId = ocId("msg");
-  const cacheAffinityHash =
+  const sessionAffinityHash =
     input.promptCacheKey === undefined
       ? undefined
       : createHash("sha256").update(input.promptCacheKey).digest("hex");
@@ -269,12 +269,10 @@ export const prepareZenRequest = (
         Authorization: "Bearer public",
         "User-Agent": `opencode/${OC_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`,
         "x-opencode-client": "cli",
-        "x-opencode-project": cacheAffinityHash
-          ? `proj_${cacheAffinityHash}`
-          : "global",
+        "x-opencode-project": "global",
         "x-opencode-request": requestId,
-        "x-opencode-session": cacheAffinityHash
-          ? `sess_${cacheAffinityHash}`
+        "x-opencode-session": sessionAffinityHash
+          ? `sess_${sessionAffinityHash}`
           : input.sessionId,
       },
       ...(lease?.agent ? { agent: lease.agent } : {}),
