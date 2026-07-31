@@ -7,6 +7,10 @@ import type { ZenFullResponse } from "../types/api.js";
 import type { ProxyLease, ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
 import {
+  OpenAiCacheUsageSseRewriter,
+  rewriteOpenAiJsonCacheUsage,
+} from "../converters/openAiCacheUsage.js";
+import {
   armProxyConnectTimeout,
   resolveProxyConnectTimeoutError,
   type ArmedProxyConnectTimeout,
@@ -489,6 +493,10 @@ export const pipeZenOpenAIResponse = (
       }
       let firstChunk: Buffer | null = null;
       let headersSent = false;
+      const nonStreamChunks: Buffer[] = [];
+      const streamRewriter = stream
+        ? new OpenAiCacheUsageSseRewriter()
+        : undefined;
 
       zenRes.on("data", (chunk: Buffer) => {
         if (!firstChunk) {
@@ -540,11 +548,22 @@ export const pipeZenOpenAIResponse = (
               "Content-Type": "application/json",
             });
           }
-          res.write(firstChunk);
+          if (stream) {
+            const rewritten = streamRewriter!.push(firstChunk);
+            if (rewritten) res.write(rewritten);
+          } else {
+            nonStreamChunks.push(firstChunk);
+          }
           return;
         }
 
-        if (headersSent) res.write(chunk);
+        if (!headersSent) return;
+        if (stream) {
+          const rewritten = streamRewriter!.push(chunk);
+          if (rewritten) res.write(rewritten);
+        } else {
+          nonStreamChunks.push(chunk);
+        }
       });
 
       zenRes.on("end", () => {
@@ -606,7 +625,16 @@ export const pipeZenOpenAIResponse = (
           }
           return;
         }
-        if (headersSent) res.end();
+        if (headersSent) {
+          if (stream) {
+            const remaining = streamRewriter!.flush();
+            if (remaining) res.write(remaining);
+          } else {
+            const raw = Buffer.concat(nonStreamChunks).toString();
+            res.write(rewriteOpenAiJsonCacheUsage(raw));
+          }
+          res.end();
+        }
       });
     });
     const proxyConnectTimeout = armProxyConnectTimeout(
