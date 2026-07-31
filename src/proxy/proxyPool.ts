@@ -11,6 +11,7 @@ import {
 import { ConnectTimeoutSocksProxyAgent } from "./socksConnectAgent.js";
 
 export type ProxyType = "http" | "https" | "socks5";
+export type ProxyDisabledReason = "manual" | "daily_limit" | "rate_limit";
 
 export interface ProxyNode {
   id: string;
@@ -19,6 +20,7 @@ export interface ProxyNode {
   url: string;
   source: string | null;
   enabled: boolean;
+  disabledReason: ProxyDisabledReason | null;
   weight: number;
   maxConcurrency: number;
   currentConcurrency: number;
@@ -42,9 +44,13 @@ export interface ProxyRequestResult {
   statusCode: number;
 }
 
+type StoredProxyNode = Omit<ProxyNode, "disabledReason"> & {
+  disabledReason?: ProxyDisabledReason | null;
+};
+
 interface ProxyFile {
   version: 1;
-  proxies: ProxyNode[];
+  proxies: StoredProxyNode[];
 }
 
 export interface ProxyInput {
@@ -121,6 +127,8 @@ export interface ProxyPoolOptions {
 export const DEFAULT_PROXY_CONNECTIVITY_CHECK_URL = "https://cp.cloudflare.com/generate_204";
 export const DEFAULT_PROXY_CHECK_CONCURRENCY = 10;
 
+const DAILY_REQUEST_LIMIT_ERROR = "Daily request limit reached";
+const RATE_LIMIT_DISABLED_ERROR = "Disabled after 5 consecutive 429 responses";
 const today = () => new Date().toISOString().slice(0, 10);
 
 export class ProxyPoolStore {
@@ -265,9 +273,15 @@ export class ProxyPoolStore {
     if (input.url !== undefined) node.url = input.url.trim();
     if (input.enabled !== undefined) {
       node.enabled = input.enabled;
+      node.disabledReason = input.enabled ? null : "manual";
       if (input.enabled) {
         node.consecutiveRateLimitCount = 0;
-        if (node.lastError === "Disabled after 5 consecutive 429 responses") node.lastError = null;
+        if (
+          node.lastError === RATE_LIMIT_DISABLED_ERROR
+          || node.lastError === DAILY_REQUEST_LIMIT_ERROR
+        ) {
+          node.lastError = null;
+        }
       }
     }
     if (input.weight !== undefined) node.weight = Math.max(1, Math.trunc(input.weight));
@@ -337,7 +351,7 @@ export class ProxyPoolStore {
     node.successCount += 1;
     node.consecutiveRateLimitCount = 0;
     this.recordResult(node, true, 200);
-    node.lastError = null;
+    if (node.disabledReason !== "daily_limit") node.lastError = null;
     node.lastCheckedAt = new Date().toISOString();
     this.release(id);
   }
@@ -353,8 +367,9 @@ export class ProxyPoolStore {
       node.consecutiveRateLimitCount += 1;
       if (node.consecutiveRateLimitCount >= 5) {
         node.enabled = false;
+        node.disabledReason = "rate_limit";
         node.cooldownUntil = null;
-        node.lastError = "Disabled after 5 consecutive 429 responses";
+        node.lastError = RATE_LIMIT_DISABLED_ERROR;
       }
     } else {
       node.cooldownUntil = new Date(Date.now() + (options.cooldownMs ?? 5 * 60 * 1000)).toISOString();
@@ -388,10 +403,13 @@ export class ProxyPoolStore {
   }
 
   private async runCleanupInvalid(concurrency: number): Promise<ProxyCleanupResult> {
+    this.resetDailyIfNeeded();
     const snapshot = this.proxies.map((node) => ({ ...node }));
     const testSnapshot = snapshot.filter((node) => node.enabled);
     const disabledIds = new Set(
-      snapshot.filter((node) => !node.enabled).map((node) => node.id),
+      snapshot
+        .filter((node) => !node.enabled && node.disabledReason !== "daily_limit")
+        .map((node) => node.id),
     );
     const beforeDisabledCleanup = this.proxies.length;
     this.proxies = this.proxies.filter(
@@ -501,6 +519,7 @@ export class ProxyPoolStore {
       url: input.url?.trim() || "",
       source,
       enabled: input.enabled ?? true,
+      disabledReason: input.enabled === false ? "manual" : null,
       weight: Math.max(1, Math.trunc(input.weight || 1)),
       maxConcurrency: Math.max(1, Math.trunc(input.maxConcurrency || 10)),
       currentConcurrency: 0,
@@ -620,19 +639,21 @@ export class ProxyPoolStore {
       if (node.dailyCountDate === current) continue;
       node.dailyCountDate = current;
       node.dailyRequestCount = 0;
-      if (node.autoDisableWhenDailyLimitReached && node.lastError === "Daily request limit reached") {
+      if (node.disabledReason === "daily_limit") {
         node.enabled = true;
-        node.lastError = null;
+        node.disabledReason = null;
+        if (node.lastError === DAILY_REQUEST_LIMIT_ERROR) node.lastError = null;
       }
       changed = true;
     }
     if (changed) this.persist();
   }
 
-  private normalizeDaily(node: ProxyNode): ProxyNode {
+  private normalizeDaily(node: StoredProxyNode): ProxyNode {
     return {
       ...node,
       source: node.source || null,
+      disabledReason: this.normalizeDisabledReason(node),
       currentConcurrency: 0,
       dailyCountDate: node.dailyCountDate || today(),
       dailyRequestLimit: node.dailyRequestLimit || 0,
@@ -643,6 +664,31 @@ export class ProxyPoolStore {
     };
   }
 
+  private normalizeDisabledReason(node: StoredProxyNode): ProxyDisabledReason | null {
+    if (node.enabled) return null;
+    if (
+      node.disabledReason === "manual"
+      || node.disabledReason === "daily_limit"
+      || node.disabledReason === "rate_limit"
+    ) {
+      return node.disabledReason;
+    }
+    if (
+      node.autoDisableWhenDailyLimitReached
+      && (
+        node.lastError === DAILY_REQUEST_LIMIT_ERROR
+        || (
+          node.dailyRequestLimit > 0
+          && node.dailyRequestCount >= node.dailyRequestLimit
+        )
+      )
+    ) {
+      return "daily_limit";
+    }
+    if (node.lastError === RATE_LIMIT_DISABLED_ERROR) return "rate_limit";
+    return "manual";
+  }
+
   private recordResult(node: ProxyNode, ok: boolean, statusCode: number): void {
     node.recentResults = [...(node.recentResults || []), { at: new Date().toISOString(), ok, statusCode }].slice(-20);
   }
@@ -651,7 +697,8 @@ export class ProxyPoolStore {
     if (node.dailyRequestLimit === 0 || node.dailyRequestCount < node.dailyRequestLimit) return;
     if (!node.autoDisableWhenDailyLimitReached) return;
     node.enabled = false;
-    node.lastError = "Daily request limit reached";
+    node.disabledReason = "daily_limit";
+    node.lastError = DAILY_REQUEST_LIMIT_ERROR;
   }
 
   private find(id: string): ProxyNode | undefined {

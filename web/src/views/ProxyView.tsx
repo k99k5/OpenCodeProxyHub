@@ -23,7 +23,11 @@ const proxyModes = [
   { value: "required", label: "强制代理", description: "无可用节点时请求失败" },
 ] as const;
 
+const isDailyLimitPaused = (proxy: ProxyNode) =>
+  !proxy.enabled && proxy.disabledReason === "daily_limit";
+
 const stateBadge = (proxy: ProxyNode): { label: string; variant: "muted" | "warning" | "info" | "destructive" | "success" } => {
+  if (isDailyLimitPaused(proxy)) return { label: "额度暂停", variant: "warning" };
   if (!proxy.enabled) return { label: "已禁用", variant: "muted" };
   if (proxy.consecutiveRateLimitCount >= 3) return { label: "429 风险", variant: "warning" };
   if (proxy.cooldownUntil && Date.parse(proxy.cooldownUntil) > Date.now()) return { label: "冷却中", variant: "info" };
@@ -65,7 +69,8 @@ export function ProxyView({ data }: { data: ConsoleData }) {
   const [listWidth, setListWidth] = useState(0);
   const hasProxies = proxies.length > 0;
   const enabledProxyCount = proxies.filter((proxy) => proxy.enabled).length;
-  const disabledProxyCount = proxies.length - enabledProxyCount;
+  const dailyLimitPausedCount = proxies.filter(isDailyLimitPaused).length;
+  const disabledProxyCount = proxies.length - enabledProxyCount - dailyLimitPausedCount;
 
   useEffect(() => {
     const element = listRef.current;
@@ -181,7 +186,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
               <h2 className="text-sm font-semibold">代理自动维护</h2>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步后直接清理已禁用节点，其余节点加入公网检测队列。
+              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步后保留每日额度暂停节点，直接清理其他禁用节点，其余节点加入公网检测队列。
             </p>
           </div>
           <Switch
@@ -244,7 +249,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
                 <span>Worker {cleanupQueue?.checking ?? 0}/{cleanupQueue?.concurrency ?? 10}</span>
               </div>
               {proxySyncStatus?.running && !cleanupQueue?.running ? (
-                <div className="mt-2">正在获取代理，完成后会直接清理已禁用节点，并将其余节点加入检测队列。</div>
+                <div className="mt-2">正在获取代理，完成后会保留每日额度暂停节点，直接清理其他禁用节点，并将其余节点加入检测队列。</div>
               ) : (
                 <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
                   <span>总数 {cleanupQueue?.total ?? 0}</span>
@@ -517,7 +522,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
       <ConfirmDialog
         open={cleanupConfirmOpen}
         title="清理失效代理"
-        message={`将直接删除 ${disabledProxyCount} 个已禁用代理，并按队列检测其余 ${enabledProxyCount} 个已启用代理（最多 10 个同时检测）；无法访问公共互联网的节点也会永久删除。是否继续？`}
+        message={`将保留 ${dailyLimitPausedCount} 个每日额度暂停代理，直接删除 ${disabledProxyCount} 个其他已禁用代理，并按队列检测 ${enabledProxyCount} 个已启用代理（最多 10 个同时检测）；无法访问公共互联网的节点也会永久删除。是否继续？`}
         confirmText="检测并清理"
         busy={busy}
         onCancel={() => setCleanupConfirmOpen(false)}

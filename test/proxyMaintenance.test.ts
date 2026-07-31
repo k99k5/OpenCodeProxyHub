@@ -20,9 +20,10 @@ const createPool = (probe?: (node: ProxyNode) => Promise<void>) => {
   tempDirs.push(directory);
   const settings = new SettingsStore(path.join(directory, "settings.json"));
   settings.load();
-  const pool = new ProxyPoolStore(path.join(directory, "proxies.json"), settings, { probe });
+  const proxiesFile = path.join(directory, "proxies.json");
+  const pool = new ProxyPoolStore(proxiesFile, settings, { probe });
   pool.load();
-  return { pool, settings };
+  return { pool, settings, proxiesFile };
 };
 
 describe("ProxyPoolStore maintenance", () => {
@@ -132,6 +133,106 @@ describe("ProxyPoolStore maintenance", () => {
       },
       { total: 1, completed: 1, succeeded: 1, failed: 0, deleted: 1 },
     );
+  });
+
+  test("cleanup preserves daily-limit paused nodes and restores them the next day", async (context) => {
+    const initialNow = Date.parse("2026-07-31T00:00:00.000Z");
+    context.mock.timers.enable({ apis: ["Date"], now: initialNow });
+    const probed: string[] = [];
+    const { pool } = createPool(async (node) => {
+      probed.push(node.name);
+    });
+    const quotaPaused = pool.create({
+      name: "quota-paused",
+      url: "http://quota-paused.example:8080",
+      dailyRequestLimit: 1,
+      autoDisableWhenDailyLimitReached: true,
+    });
+
+    const lease = pool.acquire();
+    assert.equal(lease.node?.id, quotaPaused.id);
+    pool.markSuccess(quotaPaused.id);
+
+    assert.deepEqual(
+      {
+        enabled: pool.list()[0]?.enabled,
+        disabledReason: pool.list()[0]?.disabledReason,
+        lastError: pool.list()[0]?.lastError,
+      },
+      {
+        enabled: false,
+        disabledReason: "daily_limit",
+        lastError: "Daily request limit reached",
+      },
+    );
+
+    const sameDayResult = await pool.cleanupInvalid(2);
+    assert.deepEqual(sameDayResult, {
+      tested: 0,
+      deleted: 0,
+      remaining: 1,
+      failures: [],
+    });
+    assert.deepEqual(probed, []);
+
+    context.mock.timers.setTime(initialNow + 24 * 60 * 60 * 1000);
+    const nextDayResult = await pool.cleanupInvalid(2);
+    assert.deepEqual(nextDayResult, {
+      tested: 1,
+      deleted: 0,
+      remaining: 1,
+      failures: [],
+    });
+    assert.deepEqual(probed, ["quota-paused"]);
+    assert.deepEqual(
+      {
+        enabled: pool.list()[0]?.enabled,
+        disabledReason: pool.list()[0]?.disabledReason,
+        dailyRequestCount: pool.list()[0]?.dailyRequestCount,
+      },
+      {
+        enabled: true,
+        disabledReason: null,
+        dailyRequestCount: 0,
+      },
+    );
+  });
+
+  test("loads legacy daily-limit pauses without deleting them", async () => {
+    const { pool, settings, proxiesFile } = createPool();
+    const legacyNode = pool.create({
+      name: "legacy-quota-paused",
+      url: "http://legacy-quota-paused.example:8080",
+      dailyRequestLimit: 1,
+      autoDisableWhenDailyLimitReached: true,
+    });
+    const lease = pool.acquire();
+    assert.equal(lease.node?.id, legacyNode.id);
+    pool.markSuccess(legacyNode.id);
+
+    const persisted = JSON.parse(fs.readFileSync(proxiesFile, "utf8")) as {
+      proxies: Array<Record<string, unknown>>;
+    };
+    delete persisted.proxies[0]?.disabledReason;
+    if (persisted.proxies[0]) persisted.proxies[0].lastError = null;
+    fs.writeFileSync(proxiesFile, JSON.stringify(persisted));
+
+    const probed: string[] = [];
+    const reloaded = new ProxyPoolStore(proxiesFile, settings, {
+      probe: async (node) => {
+        probed.push(node.name);
+      },
+    });
+    reloaded.load();
+
+    assert.equal(reloaded.list()[0]?.disabledReason, "daily_limit");
+    assert.deepEqual(await reloaded.cleanupInvalid(2), {
+      tested: 0,
+      deleted: 0,
+      remaining: 1,
+      failures: [],
+    });
+    assert.deepEqual(probed, []);
   });
 
   test("cleanup completes without workers when every node is disabled", async () => {
@@ -277,6 +378,16 @@ describe("ProxySyncService", () => {
         activeChecks -= 1;
       }
     });
+    const quotaPaused = pool.create({
+      name: "manual-quota-paused",
+      url: "http://manual-quota-paused.example:8080",
+      dailyRequestLimit: 1,
+      autoDisableWhenDailyLimitReached: true,
+    });
+    const lease = pool.acquire();
+    assert.equal(lease.node?.id, quotaPaused.id);
+    pool.markSuccess(quotaPaused.id);
+
     const imported = pool.import([
       "manual-healthy.example:8080",
       "manual-dead.example:8080",
@@ -316,13 +427,18 @@ describe("ProxySyncService", () => {
 
     assert.equal(result.cleanup.tested, 6);
     assert.equal(result.cleanup.deleted, 3);
-    assert.equal(result.cleanup.remaining, 4);
-    assert.equal(result.total, 4);
+    assert.equal(result.cleanup.remaining, 5);
+    assert.equal(result.total, 5);
     assert.equal(maxActiveChecks, 2);
     assert.equal(checkedUrls.includes("http://manual-disabled.example:8080"), false);
+    assert.equal(checkedUrls.includes("http://manual-quota-paused.example:8080"), false);
     assert.equal(pool.list().some((node) => node.url === "http://manual-healthy.example:8080"), true);
     assert.equal(pool.list().some((node) => node.url === "http://manual-dead.example:8080"), false);
     assert.equal(pool.list().some((node) => node.url === "http://manual-disabled.example:8080"), false);
+    assert.equal(pool.list().some((node) => (
+      node.url === "http://manual-quota-paused.example:8080"
+      && node.disabledReason === "daily_limit"
+    )), true);
     assert.equal(pool.list().some((node) => node.url === "http://10.0.0.2:8080"), false);
     assert.deepEqual(
       {
