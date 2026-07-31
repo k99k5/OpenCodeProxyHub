@@ -14,6 +14,8 @@ import {
 const OC_VERSION = "1.15.0";
 const noProxyAvailableError =
   "Proxy is required but no proxy node is available";
+export const EMPTY_UPSTREAM_RESPONSE_MESSAGE =
+  "Empty response from upstream";
 
 export interface ZenRequestInput {
   model: string;
@@ -87,6 +89,10 @@ export interface ZenRetryingStream {
   destroy(): void;
 }
 
+export interface ZenStreamResponseControl {
+  retryFailure(error: Error, statusCode?: number): boolean;
+}
+
 export const requestZenStreamWithRetry = (
   prepared: ZenPreparedRequest,
   proxyPool: ProxyPoolStore | undefined,
@@ -95,6 +101,7 @@ export const requestZenStreamWithRetry = (
     response: IncomingMessage,
     proxyId: string | undefined,
     durationMs: () => number,
+    control: ZenStreamResponseControl,
   ) => void,
   onError: (error: Error, statusCode: number) => void,
 ): ZenRetryingStream => {
@@ -147,8 +154,20 @@ export const requestZenStreamWithRetry = (
         return;
       }
       responseAccepted = true;
-      onResponse(response, proxyId, durationMs);
       let responseFinished = false;
+      const retryFailure = (error: Error, failureStatusCode = 502): boolean => {
+        if (responseFinished || stopped) return false;
+        responseFinished = true;
+        fail(error.message, failureStatusCode);
+        metrics?.recordUpstream({
+          statusCode: failureStatusCode,
+          durationMs: durationMs(),
+          proxyId,
+          error: error.message,
+        });
+        return retry();
+      };
+      onResponse(response, proxyId, durationMs, { retryFailure });
       const handleResponseFailure = (error: Error): void => {
         if (responseFinished || stopped) return;
         responseFinished = true;
@@ -292,6 +311,29 @@ export const requestZenFull = (
         zenRes.on("data", (chunk: Buffer) => chunks.push(chunk));
         zenRes.on("end", () => {
           const statusCode = zenRes.statusCode || 502;
+          const raw = Buffer.concat(chunks).toString();
+          if (
+            statusCode >= 200 &&
+            statusCode < 300 &&
+            raw.trim().length === 0
+          ) {
+            const error = new Error(EMPTY_UPSTREAM_RESPONSE_MESSAGE);
+            failCurrent(error.message, 502);
+            metrics?.recordUpstream({
+              statusCode: 502,
+              durationMs: durationMs(),
+              proxyId: attemptProxyId,
+              error: error.message,
+            });
+            if (retry()) {
+              superseded = true;
+              attempt();
+              return;
+            }
+            settled = true;
+            reject(error);
+            return;
+          }
           if (shouldRetryStatus(statusCode)) {
             failCurrent(`Upstream returned ${statusCode}`, statusCode);
             if (retry()) {
@@ -312,7 +354,6 @@ export const requestZenFull = (
             durationMs: durationMs(),
             proxyId: attemptProxyId,
           });
-          const raw = Buffer.concat(chunks).toString();
           settled = true;
           try {
             resolve({ status: statusCode, data: JSON.parse(raw), raw });
@@ -497,6 +538,34 @@ export const pipeZenOpenAIResponse = (
       });
 
       zenRes.on("end", () => {
+        if (
+          statusCode >= 200 &&
+          statusCode < 300 &&
+          !headersSent &&
+          !firstChunk
+        ) {
+          failCurrent(EMPTY_UPSTREAM_RESPONSE_MESSAGE, 502);
+          metrics?.recordUpstream({
+            statusCode: 502,
+            durationMs: durationMs(),
+            proxyId: attemptProxyId,
+            error: EMPTY_UPSTREAM_RESPONSE_MESSAGE,
+          });
+          if (retry()) return;
+          finished = true;
+          if (!res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: {
+                  message: EMPTY_UPSTREAM_RESPONSE_MESSAGE,
+                  type: "upstream_error",
+                },
+              }),
+            );
+          }
+          return;
+        }
         if (attemptProxyId && proxyPool && !markedFailure) {
           if (shouldRetryStatus(statusCode))
             proxyPool.markFailure(
@@ -519,7 +588,7 @@ export const pipeZenOpenAIResponse = (
             res.end(
               JSON.stringify({
                 error: {
-                  message: "Empty response from upstream",
+                  message: EMPTY_UPSTREAM_RESPONSE_MESSAGE,
                   type: "upstream_error",
                 },
               }),
