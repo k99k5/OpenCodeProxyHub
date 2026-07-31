@@ -59,6 +59,7 @@ export interface ProxyNode {
   url: string;
   source: string | null;
   enabled: boolean;
+  disabledReason: "manual" | "daily_limit" | "rate_limit" | null;
   weight: number;
   maxConcurrency: number;
   currentConcurrency: number;

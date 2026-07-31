@@ -61,6 +61,7 @@ const proxyNode = (id: string): ProxyNode => ({
   url: `http://${id}.example:8080`,
   source: null,
   enabled: true,
+  disabledReason: null,
   weight: 1,
   maxConcurrency: 1,
   currentConcurrency: 0,
