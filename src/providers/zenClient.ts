@@ -1,4 +1,5 @@
 import https from "node:https";
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
 import type { AppConfig } from "../config/env.js";
@@ -249,6 +250,10 @@ export const prepareZenRequest = (
 
   const body = JSON.stringify(requestBody);
   const requestId = ocId("msg");
+  const cacheAffinityHash =
+    input.promptCacheKey === undefined
+      ? undefined
+      : createHash("sha256").update(input.promptCacheKey).digest("hex");
 
   const lease = proxyPool?.acquire();
   return {
@@ -264,9 +269,13 @@ export const prepareZenRequest = (
         Authorization: "Bearer public",
         "User-Agent": `opencode/${OC_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`,
         "x-opencode-client": "cli",
-        "x-opencode-project": "global",
+        "x-opencode-project": cacheAffinityHash
+          ? `proj_${cacheAffinityHash}`
+          : "global",
         "x-opencode-request": requestId,
-        "x-opencode-session": input.sessionId,
+        "x-opencode-session": cacheAffinityHash
+          ? `sess_${cacheAffinityHash}`
+          : input.sessionId,
       },
       ...(lease?.agent ? { agent: lease.agent } : {}),
       timeout: config.upstreamTimeoutMs,
