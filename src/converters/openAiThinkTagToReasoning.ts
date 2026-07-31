@@ -6,7 +6,7 @@ import {
 } from "../providers/zenClient.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
-import { applyOpenAiCacheUsageFallback } from "./openAiCacheUsage.js";
+import { OpenAiStreamUsageNormalizer } from "./openAiCacheUsage.js";
 
 const noProxyAvailableError =
   "Proxy is required but no proxy node is available";
@@ -180,11 +180,33 @@ export const pipeOpenAiStreamStrippingThink = (
     metrics,
     (zenRes, proxyId, durationMs, control) => {
       const splitter = new ThinkTagSplitter();
+      const usageNormalizer = new OpenAiStreamUsageNormalizer();
       let buffer = "";
       let markedFailure = false;
       let receivedData = false;
       let firstChunkChecked = false;
       let aborted = false;
+      let doneSent = false;
+      const flushSplitter = (): void => {
+        const tail = splitter.flush();
+        if (!tail.reasoning && !tail.content) return;
+        sendHeaders(res);
+        writeSse(res, {
+          object: "chat.completion.chunk",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                ...(tail.reasoning
+                  ? { reasoning_content: tail.reasoning }
+                  : {}),
+                ...(tail.content ? { content: tail.content } : {}),
+              },
+              finish_reason: null,
+            },
+          ],
+        });
+      };
 
       zenRes.on("data", (chunk: Buffer) => {
         if (aborted) return;
@@ -239,17 +261,24 @@ export const pipeOpenAiStreamStrippingThink = (
         if (extracted.blocks.length > 0) firstChunkChecked = true;
 
         for (const block of extracted.blocks) {
+          if (doneSent) continue;
           if (block.data === "[DONE]") {
             sendHeaders(res);
+            flushSplitter();
+            const pendingUsage = usageNormalizer.finish();
+            if (pendingUsage !== undefined) writeSse(res, pendingUsage);
             res.write("data: [DONE]\n\n");
+            doneSent = true;
             continue;
           }
           if (!block.data) continue;
           sendHeaders(res);
           try {
             const parsed = JSON.parse(block.data);
-            applyOpenAiCacheUsageFallback(parsed);
-            writeSse(res, rewriteChunk(parsed, splitter));
+            for (const payload of usageNormalizer.push(
+              rewriteChunk(parsed, splitter),
+            ))
+              writeSse(res, payload);
           } catch {
             // Forward unparseable payloads untouched rather than dropping them.
             res.write(`data: ${block.data}\n\n`);
@@ -311,25 +340,14 @@ export const pipeOpenAiStreamStrippingThink = (
           );
           return;
         }
-        // Emit any text held back as a partial tag at stream end.
-        const tail = splitter.flush();
-        if (tail.reasoning || tail.content) {
-          sendHeaders(res);
-          writeSse(res, {
-            object: "chat.completion.chunk",
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  ...(tail.reasoning
-                    ? { reasoning_content: tail.reasoning }
-                    : {}),
-                  ...(tail.content ? { content: tail.content } : {}),
-                },
-                finish_reason: null,
-              },
-            ],
-          });
+        if (!doneSent) {
+          // Emit any text held back as a partial tag at stream end.
+          flushSplitter();
+          const pendingUsage = usageNormalizer.finish();
+          if (pendingUsage !== undefined) {
+            sendHeaders(res);
+            writeSse(res, pendingUsage);
+          }
         }
         if (!res.writableEnded) res.end();
       });

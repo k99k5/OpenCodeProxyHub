@@ -49,7 +49,14 @@ export const rewriteOpenAiJsonCacheUsage = (raw: string): string => {
   }
 };
 
-const rewriteSseBlock = (block: string): string => {
+interface ParsedSseBlock {
+  data: string;
+  dataIndexes: number[];
+  lines: string[];
+  newline: string;
+}
+
+const parseSseBlock = (block: string): ParsedSseBlock | undefined => {
   const newline = block.includes("\r\n") ? "\r\n" : "\n";
   const lines = block.split(/\r?\n/);
   const dataIndexes: number[] = [];
@@ -62,32 +69,72 @@ const rewriteSseBlock = (block: string): string => {
     dataLines.push(line.slice(5).replace(/^ /, ""));
   }
 
-  if (dataIndexes.length === 0) return block;
-  const data = dataLines.join("\n");
-  if (data.trim() === "[DONE]") return block;
-
-  try {
-    const parsed = JSON.parse(data);
-    if (!applyOpenAiCacheUsageFallback(parsed)) return block;
-
-    const firstDataIndex = dataIndexes[0]!;
-    const remainingDataIndexes = new Set(dataIndexes.slice(1));
-    return lines
-      .filter((_, index) => !remainingDataIndexes.has(index))
-      .map((line, index) =>
-        index === firstDataIndex ? `data: ${JSON.stringify(parsed)}` : line,
-      )
-      .join(newline);
-  } catch {
-    return block;
-  }
+  if (dataIndexes.length === 0) return undefined;
+  return {
+    data: dataLines.join("\n"),
+    dataIndexes,
+    lines,
+    newline,
+  };
 };
+
+const replaceSseData = (
+  block: ParsedSseBlock,
+  payload: unknown,
+): string => {
+  const firstDataIndex = block.dataIndexes[0]!;
+  const remainingDataIndexes = new Set(block.dataIndexes.slice(1));
+  return block.lines
+    .filter((_, index) => !remainingDataIndexes.has(index))
+    .map((line, index) =>
+      index === firstDataIndex ? `data: ${JSON.stringify(payload)}` : line,
+    )
+    .join(block.newline);
+};
+
+const renderSseData = (payload: unknown): string =>
+  `data: ${JSON.stringify(payload)}`;
+
+/**
+ * Moves stream usage into a standalone OpenAI-compatible `choices: []` chunk.
+ * The most recent usage payload is held until the stream terminates.
+ */
+export class OpenAiStreamUsageNormalizer {
+  private pendingUsage: JsonObject | undefined;
+
+  push(payload: unknown): unknown[] {
+    const parsed = asObject(payload);
+    const usage = asObject(parsed?.usage);
+    if (!parsed || !usage) return [payload];
+
+    applyOpenAiCacheUsageFallback(parsed);
+    this.pendingUsage = {
+      ...parsed,
+      choices: [],
+      usage,
+    };
+
+    const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+    if (choices.length === 0) return [];
+
+    return [{ ...parsed, usage: null }];
+  }
+
+  finish(): unknown | undefined {
+    const pendingUsage = this.pendingUsage;
+    this.pendingUsage = undefined;
+    return pendingUsage;
+  }
+}
 
 export class OpenAiCacheUsageSseRewriter {
   private buffer = "";
+  private done = false;
   private readonly decoder = new StringDecoder("utf8");
+  private readonly usageNormalizer = new OpenAiStreamUsageNormalizer();
 
   push(chunk: string | Buffer): string {
+    if (this.done) return "";
     this.buffer +=
       typeof chunk === "string" ? chunk : this.decoder.write(chunk);
     let output = "";
@@ -97,11 +144,14 @@ export class OpenAiCacheUsageSseRewriter {
       if (!delimiter || delimiter.index === undefined) break;
 
       const delimiterEnd = delimiter.index + delimiter[0].length;
-      output += rewriteSseBlock(this.buffer.slice(0, delimiter.index));
-      output += delimiter[0];
+      output += this.rewriteSseBlock(
+        this.buffer.slice(0, delimiter.index),
+        delimiter[0],
+      );
       this.buffer = this.buffer.slice(delimiterEnd);
     }
 
+    if (this.done) this.buffer = "";
     return output;
   }
 
@@ -109,6 +159,48 @@ export class OpenAiCacheUsageSseRewriter {
     this.buffer += this.decoder.end();
     const remaining = this.buffer;
     this.buffer = "";
-    return rewriteSseBlock(remaining);
+    let output = remaining ? this.rewriteSseBlock(remaining, "") : "";
+    if (this.done) return output;
+
+    const pendingUsage = this.usageNormalizer.finish();
+    if (pendingUsage === undefined) return output;
+
+    if (output && !/\r?\n\r?\n$/.test(output)) output += "\n\n";
+    return `${output}${renderSseData(pendingUsage)}\n\n`;
+  }
+
+  private rewriteSseBlock(block: string, delimiter: string): string {
+    if (this.done) return "";
+
+    const parsedBlock = parseSseBlock(block);
+    if (!parsedBlock) return block + delimiter;
+
+    if (parsedBlock.data.trim() === "[DONE]") {
+      this.done = true;
+      const pendingUsage = this.usageNormalizer.finish();
+      const usageBlock =
+        pendingUsage === undefined
+          ? ""
+          : `${renderSseData(pendingUsage)}${delimiter || `${parsedBlock.newline}${parsedBlock.newline}`}`;
+      return `${usageBlock}${block}${delimiter}`;
+    }
+
+    try {
+      const payloads = this.usageNormalizer.push(
+        JSON.parse(parsedBlock.data),
+      );
+      return payloads
+        .map(
+          (payload, index) =>
+            `${
+              index === 0
+                ? replaceSseData(parsedBlock, payload)
+                : renderSseData(payload)
+            }${delimiter}`,
+        )
+        .join("");
+    } catch {
+      return block + delimiter;
+    }
   }
 }
