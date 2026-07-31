@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
 import {
+  EMPTY_UPSTREAM_RESPONSE_MESSAGE,
   requestZenStreamWithRetry,
   type ZenPreparedRequest,
 } from "../providers/zenClient.js";
@@ -172,18 +173,18 @@ export const pipeOpenAiStreamStrippingThink = (
     return;
   }
 
-  const splitter = new ThinkTagSplitter();
-  let buffer = "";
-  let markedFailure = false;
-  let receivedData = false;
-  let firstChunkChecked = false;
-  let aborted = false;
-
   const request = requestZenStreamWithRetry(
     prepared,
     proxyPool,
     metrics,
-    (zenRes, proxyId, durationMs) => {
+    (zenRes, proxyId, durationMs, control) => {
+      const splitter = new ThinkTagSplitter();
+      let buffer = "";
+      let markedFailure = false;
+      let receivedData = false;
+      let firstChunkChecked = false;
+      let aborted = false;
+
       zenRes.on("data", (chunk: Buffer) => {
         if (aborted) return;
         receivedData = true;
@@ -255,22 +256,39 @@ export const pipeOpenAiStreamStrippingThink = (
       });
 
       zenRes.on("end", () => {
+        const statusCode = zenRes.statusCode || 502;
+        if (
+          statusCode >= 200 &&
+          statusCode < 300 &&
+          !receivedData &&
+          !res.headersSent
+        ) {
+          const error = new Error(EMPTY_UPSTREAM_RESPONSE_MESSAGE);
+          if (control.retryFailure(error, 502)) return;
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: {
+                message: error.message,
+                type: "upstream_error",
+              },
+            }),
+          );
+          return;
+        }
         if (proxyId && proxyPool && !markedFailure) {
-          if (
-            (zenRes.statusCode || 502) === 429 ||
-            (zenRes.statusCode || 502) >= 500
-          )
+          if (statusCode === 429 || statusCode >= 500)
             proxyPool.markFailure(
               proxyId,
-              `Upstream returned ${zenRes.statusCode || 502}`,
+              `Upstream returned ${statusCode}`,
               {
-                statusCode: zenRes.statusCode || 502,
+                statusCode,
               },
             );
           else proxyPool.markSuccess(proxyId);
         }
         metrics?.recordUpstream({
-          statusCode: zenRes.statusCode || 502,
+          statusCode,
           durationMs: durationMs(),
           proxyId,
         });
@@ -284,7 +302,7 @@ export const pipeOpenAiStreamStrippingThink = (
           res.end(
             JSON.stringify({
               error: {
-                message: "Empty response from upstream",
+                message: EMPTY_UPSTREAM_RESPONSE_MESSAGE,
                 type: "upstream_error",
               },
             }),

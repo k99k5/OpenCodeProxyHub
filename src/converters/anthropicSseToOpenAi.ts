@@ -1,6 +1,7 @@
 import type { ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
 import {
+  EMPTY_UPSTREAM_RESPONSE_MESSAGE,
   requestZenStreamWithRetry,
   type ZenPreparedRequest,
 } from "../providers/zenClient.js";
@@ -246,15 +247,16 @@ export const pipeAnthropicSseAsOpenAI = (
   }
 
   const state = createState(model);
-  let buffer = "";
-  let markedFailure = false;
-  let receivedData = false;
 
   const request = requestZenStreamWithRetry(
     prepared,
     proxyPool,
     metrics,
-    (zenRes, proxyId, durationMs) => {
+    (zenRes, proxyId, durationMs, control) => {
+      let buffer = "";
+      let markedFailure = false;
+      let receivedData = false;
+
       zenRes.on("data", (chunk: Buffer) => {
         receivedData = true;
         buffer += chunk.toString();
@@ -296,28 +298,37 @@ export const pipeAnthropicSseAsOpenAI = (
       });
 
       zenRes.on("end", () => {
+        const statusCode = zenRes.statusCode || 502;
+        if (
+          statusCode >= 200 &&
+          statusCode < 300 &&
+          !receivedData &&
+          !res.headersSent
+        ) {
+          const error = new Error(EMPTY_UPSTREAM_RESPONSE_MESSAGE);
+          if (control.retryFailure(error, 502)) return;
+          writeOpenAiError(res, 502, error.message);
+          return;
+        }
         if (proxyId && proxyPool && !markedFailure) {
-          if (
-            (zenRes.statusCode || 502) === 429 ||
-            (zenRes.statusCode || 502) >= 500
-          )
+          if (statusCode === 429 || statusCode >= 500)
             proxyPool.markFailure(
               proxyId,
-              `Upstream returned ${zenRes.statusCode || 502}`,
+              `Upstream returned ${statusCode}`,
               {
-                statusCode: zenRes.statusCode || 502,
+                statusCode,
               },
             );
           else proxyPool.markSuccess(proxyId);
         }
         metrics?.recordUpstream({
-          statusCode: zenRes.statusCode || 502,
+          statusCode,
           durationMs: durationMs(),
           proxyId,
         });
 
         if (!receivedData && !res.headersSent) {
-          writeOpenAiError(res, 502, "Empty response from upstream");
+          writeOpenAiError(res, 502, EMPTY_UPSTREAM_RESPONSE_MESSAGE);
           return;
         }
         if (!state.doneSent && !res.writableEnded) sendDone(state, res);

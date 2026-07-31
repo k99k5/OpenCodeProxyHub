@@ -2,6 +2,7 @@ import type { ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
 import type { AnthropicMessageRequest, ZenFullResponse } from "../types/api.js";
 import {
+  EMPTY_UPSTREAM_RESPONSE_MESSAGE,
   requestZenStreamWithRetry,
   type ZenPreparedRequest,
 } from "../providers/zenClient.js";
@@ -224,18 +225,19 @@ export const pipeZenAsAnthropic = (
     return;
   }
   const msgId = ocId("msg");
-  let markedFailure = false;
   const request = requestZenStreamWithRetry(
     prepared,
     proxyPool,
     metrics,
-    (zenRes, proxyId, durationMs) => {
+    (zenRes, proxyId, durationMs, control) => {
       let headersSent = false;
       let buffer = "";
       let outputTokens = 0;
       let contentIdx = 0;
       let toolIdx = -1;
       let firstChunkHandled = false;
+      let receivedData = false;
+      let markedFailure = false;
 
       const sendSSE = (event: string, data: unknown) => {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -270,6 +272,7 @@ export const pipeZenAsAnthropic = (
       };
 
       zenRes.on("data", (chunk: Buffer) => {
+        receivedData = true;
         const str = chunk.toString();
         if (!firstChunkHandled) {
           firstChunkHandled = true;
@@ -410,22 +413,43 @@ export const pipeZenAsAnthropic = (
       });
 
       zenRes.on("end", () => {
+        const statusCode = zenRes.statusCode || 502;
+        if (
+          statusCode >= 200 &&
+          statusCode < 300 &&
+          !receivedData &&
+          !res.headersSent
+        ) {
+          const error = new Error(EMPTY_UPSTREAM_RESPONSE_MESSAGE);
+          if (control.retryFailure(error, 502)) return;
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              type: "error",
+              error: {
+                type: "upstream_error",
+                message: error.message,
+              },
+            }),
+          );
+          return;
+        }
         if (proxyId && proxyPool && !markedFailure) {
           if (
-            (zenRes.statusCode || 502) === 429 ||
-            (zenRes.statusCode || 502) >= 500
+            statusCode === 429 ||
+            statusCode >= 500
           )
             proxyPool.markFailure(
               proxyId,
-              `Upstream returned ${zenRes.statusCode || 502}`,
+              `Upstream returned ${statusCode}`,
               {
-                statusCode: zenRes.statusCode || 502,
+                statusCode,
               },
             );
           else proxyPool.markSuccess(proxyId);
         }
         metrics?.recordUpstream({
-          statusCode: zenRes.statusCode || 502,
+          statusCode,
           durationMs: durationMs(),
           proxyId,
         });
@@ -435,7 +459,10 @@ export const pipeZenAsAnthropic = (
             res.end(
               JSON.stringify({
                 type: "error",
-                error: { type: "upstream_error", message: "Empty response" },
+                error: {
+                  type: "upstream_error",
+                  message: EMPTY_UPSTREAM_RESPONSE_MESSAGE,
+                },
               }),
             );
           }
