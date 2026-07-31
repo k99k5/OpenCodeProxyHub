@@ -389,24 +389,41 @@ export class ProxyPoolStore {
 
   private async runCleanupInvalid(concurrency: number): Promise<ProxyCleanupResult> {
     const snapshot = this.proxies.map((node) => ({ ...node }));
+    const testSnapshot = snapshot.filter((node) => node.enabled);
+    const disabledIds = new Set(
+      snapshot.filter((node) => !node.enabled).map((node) => node.id),
+    );
+    const beforeDisabledCleanup = this.proxies.length;
+    this.proxies = this.proxies.filter(
+      (node) => !disabledIds.has(node.id) || node.enabled,
+    );
+    const disabledDeleted = beforeDisabledCleanup - this.proxies.length;
     const concurrencyLimit = Number.isFinite(concurrency) ? Math.max(1, Math.trunc(concurrency)) : 1;
-    const workerCount = Math.min(snapshot.length, concurrencyLimit);
+    const workerCount = Math.min(testSnapshot.length, concurrencyLimit);
     const startedAt = new Date().toISOString();
     this.cleanupQueueStatus = {
-      running: snapshot.length > 0,
-      total: snapshot.length,
-      queued: snapshot.length,
+      running: testSnapshot.length > 0,
+      total: testSnapshot.length,
+      queued: testSnapshot.length,
       checking: 0,
       completed: 0,
       succeeded: 0,
       failed: 0,
-      deleted: 0,
+      deleted: disabledDeleted,
       remaining: this.proxies.length,
       concurrency: workerCount,
       startedAt,
-      completedAt: snapshot.length === 0 ? startedAt : null,
+      completedAt: testSnapshot.length === 0 ? startedAt : null,
     };
-    if (snapshot.length === 0) return { tested: 0, deleted: 0, remaining: 0, failures: [] };
+    if (disabledDeleted > 0) this.persist();
+    if (testSnapshot.length === 0) {
+      return {
+        tested: 0,
+        deleted: disabledDeleted,
+        remaining: this.proxies.length,
+        failures: [],
+      };
+    }
 
     try {
       const failed = new Map<string, { url: string; failure: ProxyCleanupFailure }>();
@@ -414,10 +431,10 @@ export class ProxyPoolStore {
       let cursor = 0;
 
       const worker = async () => {
-        while (cursor < snapshot.length) {
+        while (cursor < testSnapshot.length) {
           const index = cursor;
           cursor += 1;
-          const node = snapshot[index];
+          const node = testSnapshot[index];
           if (!node) continue;
           this.cleanupQueueStatus.queued -= 1;
           this.cleanupQueueStatus.checking += 1;
@@ -457,13 +474,14 @@ export class ProxyPoolStore {
         const failedNode = failed.get(node.id);
         return !failedNode || failedNode.url !== node.url;
       });
-      const deleted = before - this.proxies.length;
+      const failedDeleted = before - this.proxies.length;
+      const deleted = disabledDeleted + failedDeleted;
       this.persist();
       this.cleanupQueueStatus.deleted = deleted;
       this.cleanupQueueStatus.remaining = this.proxies.length;
 
       return {
-        tested: snapshot.length,
+        tested: testSnapshot.length,
         deleted,
         remaining: this.proxies.length,
         failures: [...failed.values()].map(({ failure }) => failure),
