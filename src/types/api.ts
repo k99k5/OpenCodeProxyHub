@@ -23,6 +23,7 @@ export interface OpenAIChatRequest {
   response_format?: unknown;
   seed?: number;
   user?: string;
+  prompt_cache_key?: string;
 }
 
 export interface AnthropicMessageRequest {

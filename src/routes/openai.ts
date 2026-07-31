@@ -56,6 +56,7 @@ export const registerOpenAIRoutes = async (
       response_format,
       seed,
       user,
+      prompt_cache_key,
     } = request.body || {} as OpenAIChatRequest;
     const isStream = Boolean(stream);
     const limit = await limiter.acquire(auth.id, isStream, {
@@ -134,6 +135,7 @@ export const registerOpenAIRoutes = async (
       tools,
       toolChoice: tool_choice,
       parameters: { temperature, top_p, max_tokens, stop, presence_penalty, frequency_penalty, response_format, seed, user },
+      promptCacheKey: prompt_cache_key,
       sessionId,
     }, effectiveProxyPool);
 
