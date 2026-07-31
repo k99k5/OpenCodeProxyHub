@@ -6,6 +6,7 @@ import {
 } from "../providers/zenClient.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
+import { applyOpenAiCacheUsageFallback } from "./openAiCacheUsage.js";
 
 const noProxyAvailableError =
   "Proxy is required but no proxy node is available";
@@ -247,6 +248,7 @@ export const pipeOpenAiStreamStrippingThink = (
           sendHeaders(res);
           try {
             const parsed = JSON.parse(block.data);
+            applyOpenAiCacheUsageFallback(parsed);
             writeSse(res, rewriteChunk(parsed, splitter));
           } catch {
             // Forward unparseable payloads untouched rather than dropping them.

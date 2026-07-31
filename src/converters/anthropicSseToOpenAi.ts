@@ -7,6 +7,7 @@ import {
 } from "../providers/zenClient.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
+import { applyOpenAiCacheUsageFallback } from "./openAiCacheUsage.js";
 
 const noProxyAvailableError =
   "Proxy is required but no proxy node is available";
@@ -140,6 +141,7 @@ const handleParsedPayload = (
 
   if (Array.isArray(parsed?.choices)) {
     sendHeaders(res);
+    applyOpenAiCacheUsageFallback(parsed);
     writeSse(res, parsed);
     return;
   }
