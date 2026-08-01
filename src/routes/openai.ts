@@ -141,13 +141,13 @@ export const registerOpenAIRoutes = async (
 
     reply.hijack();
     if (isStream && activeSettings.openAiStreamTransformModels.includes(model)) {
-      pipeAnthropicSseAsOpenAI(prepared, model, reply.raw, effectiveProxyPool, metrics);
+      pipeAnthropicSseAsOpenAI(prepared, model, reply.raw, effectiveProxyPool, metrics, config.maxProxyAttempts);
       return;
     }
     if (isStream && activeSettings.reasoningTagModels.includes(model)) {
-      pipeOpenAiStreamStrippingThink(prepared, model, reply.raw, effectiveProxyPool, metrics);
+      pipeOpenAiStreamStrippingThink(prepared, model, reply.raw, effectiveProxyPool, metrics, config.maxProxyAttempts);
       return;
     }
-    pipeZenOpenAIResponse(prepared, isStream, reply.raw, effectiveProxyPool, metrics);
+    pipeZenOpenAIResponse(prepared, isStream, reply.raw, effectiveProxyPool, metrics, config.maxProxyAttempts);
   });
 };

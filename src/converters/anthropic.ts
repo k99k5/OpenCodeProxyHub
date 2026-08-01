@@ -8,6 +8,7 @@ import {
 } from "../providers/zenClient.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
+import { DEFAULT_MAX_PROXY_ATTEMPTS } from "../config/env.js";
 
 export const anthropicToOpenAI = (
   body: AnthropicMessageRequest,
@@ -210,6 +211,7 @@ export const pipeZenAsAnthropic = (
   inputTokens: number,
   proxyPool?: ProxyPoolStore,
   metrics?: MetricsStore,
+  maxProxyAttempts = DEFAULT_MAX_PROXY_ATTEMPTS,
 ): void => {
   if (prepared.lease?.requiredUnavailable) {
     res.writeHead(503, { "Content-Type": "application/json" });
@@ -229,6 +231,7 @@ export const pipeZenAsAnthropic = (
     prepared,
     proxyPool,
     metrics,
+    maxProxyAttempts,
     (zenRes, proxyId, durationMs, control) => {
       let headersSent = false;
       let buffer = "";

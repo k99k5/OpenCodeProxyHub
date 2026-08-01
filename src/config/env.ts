@@ -7,6 +7,20 @@ const intFromEnv = (name: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+export const DEFAULT_MAX_PROXY_ATTEMPTS = 3;
+export const MAX_MAX_PROXY_ATTEMPTS = 50;
+
+const boundedPositiveIntFromEnv = (
+  name: string,
+  fallback: number,
+  maximum: number,
+): number => {
+  const raw = process.env[name];
+  if (!raw || !/^\d+$/.test(raw)) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return parsed >= 1 && parsed <= maximum ? parsed : fallback;
+};
+
 const boolFromEnv = (name: string, fallback: boolean): boolean => {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -32,6 +46,7 @@ export interface AppConfig {
   zenPath: string;
   upstreamTimeoutMs: number;
   proxyConnectTimeoutMs: number;
+  maxProxyAttempts: number;
   globalRequestsPerMinute: number;
   apiKeyRequestsPerMinute: number;
   apiKeyMaxConcurrentRequests: number;
@@ -58,6 +73,11 @@ export const loadConfig = (): AppConfig => ({
   zenPath: process.env.ZEN_PATH || "/zen/v1/chat/completions",
   upstreamTimeoutMs: intFromEnv("UPSTREAM_TIMEOUT_MS", 120000),
   proxyConnectTimeoutMs: intFromEnv("PROXY_CONNECT_TIMEOUT_MS", 5000),
+  maxProxyAttempts: boundedPositiveIntFromEnv(
+    "MAX_PROXY_ATTEMPTS",
+    DEFAULT_MAX_PROXY_ATTEMPTS,
+    MAX_MAX_PROXY_ATTEMPTS,
+  ),
   globalRequestsPerMinute: intFromEnv("GLOBAL_REQUESTS_PER_MINUTE", 120),
   apiKeyRequestsPerMinute: intFromEnv("API_KEY_REQUESTS_PER_MINUTE", 60),
   apiKeyMaxConcurrentRequests: intFromEnv("API_KEY_MAX_CONCURRENT_REQUESTS", 10),

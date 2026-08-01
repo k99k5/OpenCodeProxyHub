@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
 import type { AppConfig } from "../config/env.js";
+import { DEFAULT_MAX_PROXY_ATTEMPTS } from "../config/env.js";
 import type { ZenFullResponse } from "../types/api.js";
 import type { ProxyLease, ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
@@ -38,8 +39,6 @@ export interface ZenPreparedRequest {
   options: https.RequestOptions;
   lease?: ProxyLease;
 }
-
-const MAX_PROXY_ATTEMPTS = 3;
 
 const replaceProxyLease = (
   prepared: ZenPreparedRequest,
@@ -103,6 +102,7 @@ export const requestZenStreamWithRetry = (
   prepared: ZenPreparedRequest,
   proxyPool: ProxyPoolStore | undefined,
   metrics: MetricsStore | undefined,
+  maxProxyAttempts: number,
   onResponse: (
     response: IncomingMessage,
     proxyId: string | undefined,
@@ -129,7 +129,7 @@ export const requestZenStreamWithRetry = (
         proxyPool.markFailure(proxyId, message, { statusCode });
     };
     const retry = (): boolean => {
-      if (stopped || !proxyPool || attemptedProxyIds.size >= MAX_PROXY_ATTEMPTS)
+      if (stopped || !proxyPool || attemptedProxyIds.size >= maxProxyAttempts)
         return false;
       if (!replaceProxyLease(prepared, proxyPool, attemptedProxyIds))
         return false;
@@ -143,7 +143,7 @@ export const requestZenStreamWithRetry = (
       if (
         shouldRetryStatus(statusCode) &&
         proxyPool &&
-        attemptedProxyIds.size < MAX_PROXY_ATTEMPTS &&
+        attemptedProxyIds.size < maxProxyAttempts &&
         replaceProxyLease(prepared, proxyPool, attemptedProxyIds)
       ) {
         superseded = true;
@@ -290,6 +290,7 @@ export const requestZenFull = (
   prepared: ZenPreparedRequest,
   proxyPool?: ProxyPoolStore,
   metrics?: MetricsStore,
+  maxProxyAttempts = DEFAULT_MAX_PROXY_ATTEMPTS,
 ): Promise<ZenFullResponse> => {
   return new Promise((resolve, reject) => {
     if (prepared.lease?.requiredUnavailable) {
@@ -316,7 +317,7 @@ export const requestZenFull = (
       const retry = (): boolean =>
         Boolean(
           proxyPool &&
-          attemptedProxyIds.size < MAX_PROXY_ATTEMPTS &&
+          attemptedProxyIds.size < maxProxyAttempts &&
           replaceProxyLease(prepared, proxyPool, attemptedProxyIds),
         );
 
@@ -422,6 +423,7 @@ export const pipeZenOpenAIResponse = (
   res: ServerResponse,
   proxyPool?: ProxyPoolStore,
   metrics?: MetricsStore,
+  maxProxyAttempts = DEFAULT_MAX_PROXY_ATTEMPTS,
 ): void => {
   if (prepared.lease?.requiredUnavailable) {
     res.writeHead(503, { "Content-Type": "application/json" });
@@ -458,7 +460,7 @@ export const pipeZenOpenAIResponse = (
       if (
         !proxyPool ||
         res.headersSent ||
-        attemptedProxyIds.size >= MAX_PROXY_ATTEMPTS
+        attemptedProxyIds.size >= maxProxyAttempts
       )
         return false;
       if (!replaceProxyLease(prepared, proxyPool, attemptedProxyIds))
@@ -472,7 +474,7 @@ export const pipeZenOpenAIResponse = (
       const statusCode = zenRes.statusCode || 502;
       if (shouldRetryStatus(statusCode)) {
         const hasRetryCapacity =
-          proxyPool && attemptedProxyIds.size < MAX_PROXY_ATTEMPTS;
+          proxyPool && attemptedProxyIds.size < maxProxyAttempts;
         if (
           hasRetryCapacity &&
           replaceProxyLease(prepared, proxyPool, attemptedProxyIds)
