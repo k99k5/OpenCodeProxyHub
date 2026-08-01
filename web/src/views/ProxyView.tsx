@@ -29,7 +29,7 @@ const isDailyLimitPaused = (proxy: ProxyNode) =>
 const stateBadge = (proxy: ProxyNode): { label: string; variant: "muted" | "warning" | "info" | "destructive" | "success" } => {
   if (isDailyLimitPaused(proxy)) return { label: "额度暂停", variant: "warning" };
   if (!proxy.enabled) return { label: "已禁用", variant: "muted" };
-  if (proxy.consecutiveRateLimitCount >= 3) return { label: "429 风险", variant: "warning" };
+  if (proxy.consecutiveRateLimitCount >= 1) return { label: "429 风险", variant: "warning" };
   if (proxy.cooldownUntil && Date.parse(proxy.cooldownUntil) > Date.now()) return { label: "冷却中", variant: "info" };
   if (proxy.lastError) return { label: "异常", variant: "destructive" };
   return { label: "健康", variant: "success" };
@@ -130,7 +130,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
           <InfoCard icon={<Route size={16} className="text-primary" />} title="当前策略" value="优先填充" sub="高权重节点优先，同权重按顺序" />
         </motion.div>
         <motion.div variants={fadeUp}>
-          <InfoCard icon={<AlertTriangle size={16} className="text-warning" />} title="429 熔断" value="连续 5 次" sub="触发后自动禁用，需手动开启" />
+          <InfoCard icon={<AlertTriangle size={16} className="text-warning" />} title="429 熔断" value="1 次" sub="触发后自动禁用，需手动开启" />
         </motion.div>
         <motion.div variants={fadeUp}>
           <InfoCard icon={<CheckCircle2 size={16} className="text-success" />} title="优先节点" value={prioritized?.name || "无可用"} sub="按权重与可用性选出" />
@@ -399,7 +399,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
             </span>
             <h3 className="mt-3 text-sm font-semibold">尚未配置出口节点</h3>
             <p className="mt-1 max-w-md text-xs text-muted-foreground">
-              添加 HTTP、HTTPS 或 SOCKS5 代理后，网关会优先填充第一个可用节点，连续 5 次 429 会自动禁用该节点。
+              添加 HTTP、HTTPS 或 SOCKS5 代理后，网关会优先填充第一个可用节点，触发 1 次 429 即会自动禁用该节点。
             </p>
           </div>
         </Card>
@@ -442,7 +442,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
                 <div className="mt-4 space-y-3">
                   <MeterBar label="今日用量" current={proxy.dailyRequestCount} max={proxy.dailyRequestLimit} />
                   <MeterBar label="并发" current={proxy.currentConcurrency} max={proxy.maxConcurrency} />
-                  <MeterBar label="连续 429" current={proxy.consecutiveRateLimitCount || 0} max={5} unlimitedText="5" />
+                  <MeterBar label="连续 429" current={proxy.consecutiveRateLimitCount || 0} max={1} unlimitedText="1" />
                 </div>
 
                 {(() => {

@@ -27,6 +27,19 @@ const createPool = (probe?: (node: ProxyNode) => Promise<void>) => {
 };
 
 describe("ProxyPoolStore maintenance", () => {
+  test("disables a proxy after its first 429 response", () => {
+    const { pool } = createPool();
+    const proxy = pool.create({ name: "rate-limited", url: "http://rate-limited.example:8080" });
+
+    pool.markFailure(proxy.id, "Too Many Requests", { statusCode: 429 });
+
+    const updated = pool.list().find((node) => node.id === proxy.id);
+    assert.equal(updated?.enabled, false);
+    assert.equal(updated?.disabledReason, "rate_limit");
+    assert.equal(updated?.consecutiveRateLimitCount, 1);
+    assert.equal(updated?.lastError, "Disabled after a 429 response");
+  });
+
   test("uses a neutral public connectivity endpoint by default", () => {
     assert.equal(DEFAULT_PROXY_CONNECTIVITY_CHECK_URL, "https://cp.cloudflare.com/generate_204");
     assert.equal(DEFAULT_PROXY_CONNECTIVITY_CHECK_URL.includes("opencode.ai"), false);
