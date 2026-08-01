@@ -117,12 +117,12 @@ export const registerAnthropicRoutes = async (
 
     if (isStream) {
       reply.hijack();
-      pipeZenAsAnthropic(prepared, model, reply.raw, inputTokens, effectiveProxyPool, metrics);
+      pipeZenAsAnthropic(prepared, model, reply.raw, inputTokens, effectiveProxyPool, metrics, config.maxProxyAttempts);
       return;
     }
 
     try {
-      const zenResp = await requestZenFull(prepared, effectiveProxyPool, metrics);
+      const zenResp = await requestZenFull(prepared, effectiveProxyPool, metrics, config.maxProxyAttempts);
       const result = handleAnthropicFullResponse(zenResp, model, inputTokens);
       return reply.code(result.status).send(result.body);
     } catch (error) {

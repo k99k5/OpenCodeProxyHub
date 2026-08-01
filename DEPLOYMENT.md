@@ -150,6 +150,8 @@ PROXY_CONNECT_TIMEOUT_MS=5000
 
 It covers the proxy TCP connection, HTTP `CONNECT` or SOCKS5 negotiation, proxy authentication, and the target TLS handshake. When it expires, the node enters the normal 5-minute cooldown and the request switches to another untried proxy. It does not limit model generation or an established response stream. The value can also be changed at runtime as `proxyConnectTimeoutMs` in the Web console or `PATCH /admin/settings`.
 
+`MAX_PROXY_ATTEMPTS` controls how many distinct proxy nodes one request may try. It defaults to `3`, accepts positive integers from `1` through `50`, and is configured at process startup. Higher values increase worst-case request latency and upstream load. When raising it, also design an overall retry time budget so that as many as 50 sequential timeouts cannot accumulate without a bound.
+
 The proxy console also supports:
 
 - checking every configured proxy through a bounded worker queue (at most 10 concurrent checks) against Cloudflare's `https://cp.cloudflare.com/generate_204` connectivity endpoint and deleting nodes that cannot access the public internet

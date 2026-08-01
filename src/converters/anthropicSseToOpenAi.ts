@@ -7,6 +7,7 @@ import {
 } from "../providers/zenClient.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
+import { DEFAULT_MAX_PROXY_ATTEMPTS } from "../config/env.js";
 import { applyOpenAiCacheUsageFallback } from "./openAiCacheUsage.js";
 
 const noProxyAvailableError =
@@ -237,6 +238,7 @@ export const pipeAnthropicSseAsOpenAI = (
   res: ServerResponse,
   proxyPool?: ProxyPoolStore,
   metrics?: MetricsStore,
+  maxProxyAttempts = DEFAULT_MAX_PROXY_ATTEMPTS,
 ): void => {
   if (prepared.lease?.requiredUnavailable) {
     res.writeHead(503, { "Content-Type": "application/json" });
@@ -254,6 +256,7 @@ export const pipeAnthropicSseAsOpenAI = (
     prepared,
     proxyPool,
     metrics,
+    maxProxyAttempts,
     (zenRes, proxyId, durationMs, control) => {
       let buffer = "";
       let markedFailure = false;

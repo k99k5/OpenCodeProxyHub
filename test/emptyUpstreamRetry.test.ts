@@ -369,6 +369,7 @@ describe("empty upstream retry", () => {
       prepared: ZenPreparedRequest,
       response: ServerResponse,
       pool: ProxyPoolStore,
+      maxProxyAttempts?: number,
     ) => void;
   }> = [
     {
@@ -377,8 +378,8 @@ describe("empty upstream retry", () => {
         'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n' +
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
         "data: [DONE]\n\n",
-      pipe: (prepared, response, pool) =>
-        pipeZenAsAnthropic(prepared, "test-model", response, 10, pool),
+      pipe: (prepared, response, pool, maxProxyAttempts) =>
+        pipeZenAsAnthropic(prepared, "test-model", response, 10, pool, undefined, maxProxyAttempts),
     },
     {
       name: "Anthropic SSE to OpenAI conversion",
@@ -386,12 +387,14 @@ describe("empty upstream retry", () => {
         'event: message_start\ndata: {"type":"message_start","message":{}}\n\n' +
         'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n' +
         'event: message_stop\ndata: {"type":"message_stop"}\n\n',
-      pipe: (prepared, response, pool) =>
+      pipe: (prepared, response, pool, maxProxyAttempts) =>
         pipeAnthropicSseAsOpenAI(
           prepared,
           "test-model",
           response,
           pool,
+          undefined,
+          maxProxyAttempts,
         ),
     },
     {
@@ -399,12 +402,14 @@ describe("empty upstream retry", () => {
       successBody:
         'data: {"choices":[{"delta":{"content":"<think>why</think>ok"}}]}\n\n' +
         "data: [DONE]\n\n",
-      pipe: (prepared, response, pool) =>
+      pipe: (prepared, response, pool, maxProxyAttempts) =>
         pipeOpenAiStreamStrippingThink(
           prepared,
           "test-model",
           response,
           pool,
+          undefined,
+          maxProxyAttempts,
         ),
     },
   ];
@@ -442,4 +447,142 @@ describe("empty upstream retry", () => {
       }
     });
   }
+
+  const fiftyProxyIds = Array.from(
+    { length: 51 },
+    (_, index) => `proxy-${index + 1}`,
+  );
+
+  for (const scenario of transformedStreams) {
+    test(`${scenario.name} can use the configured 50 distinct proxy attempts`, async () => {
+      const fakePool = createFakePool(fiftyProxyIds);
+      const upstream = installUpstreamResponses([
+        ...Array.from({ length: 49 }, () => ({ body: "" })),
+        { body: scenario.successBody },
+      ]);
+      const response = new FakeServerResponse();
+      try {
+        scenario.pipe(
+          preparedRequest(fakePool.initialLease),
+          response as unknown as ServerResponse,
+          fakePool.pool,
+          50,
+        );
+        await waitForResponse(response);
+        assert.equal(upstream.requestCount(), 50);
+        assert.equal(new Set([fiftyProxyIds[0], ...fakePool.acquiredAfterInitial]).size, 50);
+      } finally {
+        upstream.restore();
+      }
+    });
+  }
+
+  test("OpenAI passthrough can use the configured 50 distinct proxy attempts", async () => {
+    const fakePool = createFakePool(fiftyProxyIds);
+    const upstream = installUpstreamResponses([
+      ...Array.from({ length: 49 }, () => ({ body: "" })),
+      { body: '{"choices":[{"message":{"content":"ok"}}]}' },
+    ]);
+    const response = new FakeServerResponse();
+    try {
+      pipeZenOpenAIResponse(
+        preparedRequest(fakePool.initialLease), false,
+        response as unknown as ServerResponse, fakePool.pool, undefined, 50,
+      );
+      await waitForResponse(response);
+      assert.equal(upstream.requestCount(), 50);
+      assert.equal(new Set([fiftyProxyIds[0], ...fakePool.acquiredAfterInitial]).size, 50);
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  test("requestZenFull can use the configured 50 distinct proxy attempts", async () => {
+    const fakePool = createFakePool(fiftyProxyIds);
+    const upstream = installUpstreamResponses([
+      ...Array.from({ length: 49 }, () => ({ body: "" })),
+      { body: '{"choices":[{"message":{"content":"ok"}}]}' },
+    ]);
+    try {
+      const result = await requestZenFull(
+        preparedRequest(fakePool.initialLease),
+        fakePool.pool,
+        undefined,
+        50,
+      );
+      assert.equal(result.status, 200);
+      assert.equal(upstream.requestCount(), 50);
+      assert.equal(new Set([fiftyProxyIds[0], ...fakePool.acquiredAfterInitial]).size, 50);
+      assert.deepEqual(fakePool.acquiredAfterInitial, fiftyProxyIds.slice(1, 50));
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  test("requestZenFull fails at the configured attempt limit", async () => {
+    const fakePool = createFakePool(fiftyProxyIds);
+    const upstream = installUpstreamResponses(
+      Array.from({ length: 50 }, () => ({ body: "" })),
+    );
+    try {
+      await assert.rejects(
+        requestZenFull(preparedRequest(fakePool.initialLease), fakePool.pool, undefined, 50),
+        new RegExp(EMPTY_UPSTREAM_RESPONSE_MESSAGE),
+      );
+      assert.equal(upstream.requestCount(), 50);
+      assert.equal(new Set([fiftyProxyIds[0], ...fakePool.acquiredAfterInitial]).size, 50);
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  test("requestZenFull stops when fewer proxies are available than the configured limit", async () => {
+    const fakePool = createFakePool(["only-1", "only-2"]);
+    const upstream = installUpstreamResponses([{ body: "" }, { body: "" }]);
+    try {
+      await assert.rejects(
+        requestZenFull(preparedRequest(fakePool.initialLease), fakePool.pool, undefined, 50),
+        new RegExp(EMPTY_UPSTREAM_RESPONSE_MESSAGE),
+      );
+      assert.equal(upstream.requestCount(), 2);
+      assert.deepEqual(fakePool.acquiredAfterInitial, ["only-2"]);
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  test("requestZenFull does not retry without a proxy pool", async () => {
+    const upstream = installUpstreamResponses([{ body: "" }]);
+    try {
+      await assert.rejects(
+        requestZenFull({ body: "{}", options: {} }, undefined, undefined, 50),
+        new RegExp(EMPTY_UPSTREAM_RESPONSE_MESSAGE),
+      );
+      assert.equal(upstream.requestCount(), 1);
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  test("OpenAI passthrough does not retry after response headers are sent", async () => {
+    const fakePool = createFakePool(["started", "unused"]);
+    const upstream = installUpstreamResponses([{ body: "partial response" }]);
+    const response = new FakeServerResponse();
+    try {
+      pipeZenOpenAIResponse(
+        preparedRequest(fakePool.initialLease),
+        false,
+        response as unknown as ServerResponse,
+        fakePool.pool,
+        undefined,
+        50,
+      );
+      await waitForResponse(response);
+      assert.equal(response.headersSent, true);
+      assert.equal(upstream.requestCount(), 1);
+      assert.deepEqual(fakePool.acquiredAfterInitial, []);
+    } finally {
+      upstream.restore();
+    }
+  });
 });
