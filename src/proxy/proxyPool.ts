@@ -128,7 +128,7 @@ export const DEFAULT_PROXY_CONNECTIVITY_CHECK_URL = "https://cp.cloudflare.com/g
 export const DEFAULT_PROXY_CHECK_CONCURRENCY = 10;
 
 const DAILY_REQUEST_LIMIT_ERROR = "Daily request limit reached";
-const RATE_LIMIT_DISABLED_ERROR = "Disabled after 5 consecutive 429 responses";
+const RATE_LIMIT_DISABLED_ERROR = "Disabled after a 429 response";
 const today = () => new Date().toISOString().slice(0, 10);
 
 export class ProxyPoolStore {
@@ -365,12 +365,10 @@ export class ProxyPoolStore {
     node.lastCheckedAt = new Date().toISOString();
     if (options.statusCode === 429) {
       node.consecutiveRateLimitCount += 1;
-      if (node.consecutiveRateLimitCount >= 5) {
-        node.enabled = false;
-        node.disabledReason = "rate_limit";
-        node.cooldownUntil = null;
-        node.lastError = RATE_LIMIT_DISABLED_ERROR;
-      }
+      node.enabled = false;
+      node.disabledReason = "rate_limit";
+      node.cooldownUntil = null;
+      node.lastError = RATE_LIMIT_DISABLED_ERROR;
     } else {
       node.cooldownUntil = new Date(Date.now() + (options.cooldownMs ?? 5 * 60 * 1000)).toISOString();
     }
