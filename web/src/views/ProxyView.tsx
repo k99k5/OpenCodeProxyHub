@@ -98,6 +98,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
   }, [settings?.proxyAutoSyncIntervalMinutes]);
   const syncIntervalDirty = syncIntervalDraft !== (settings?.proxyAutoSyncIntervalMinutes ?? 60);
   const cleanupQueue = proxySyncStatus?.cleanupQueue;
+  const proxySyncTargetCount = proxySyncStatus?.targetCount ?? 1000;
 
   const prioritized = useMemo(() => {
     const now = Date.now();
@@ -186,7 +187,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
               <h2 className="text-sm font-semibold">代理自动维护</h2>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              从 SCDN 分批获取并去重至 100 个 HTTP 代理；同步后保留每日额度暂停节点，直接清理其他禁用节点，其余节点加入公网检测队列。
+              从 SCDN 分批获取并去重至 {proxySyncTargetCount} 个 HTTP 代理；同步后保留每日额度暂停节点，直接清理其他禁用节点，其余节点加入公网检测队列。
             </p>
           </div>
           <Switch
@@ -267,7 +268,7 @@ export function ProxyView({ data }: { data: ConsoleData }) {
 
         <div className="mt-4 flex flex-wrap gap-2">
           <Button variant="outline" size="sm" disabled={busy} onClick={() => syncProxies()}>
-            <RefreshCw size={16} /> 立即同步 100 个
+            <RefreshCw size={16} /> 立即同步 {proxySyncTargetCount} 个
           </Button>
           <Button
             variant="outline"
