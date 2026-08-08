@@ -19,7 +19,6 @@ const DEFAULT_MAX_BATCHES = 100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 // The provider rejects bursts from the same client with its non-standard 456
 // status, so batches must be issued sequentially.
-const MAX_PARALLEL_BATCHES = 1;
 const MAX_BATCH_ATTEMPTS = 4;
 const RETRYABLE_HTTP_STATUSES = new Set([429, 456]);
 const DEFAULT_RETRY_DELAY_MS = 1000;
@@ -214,18 +213,11 @@ export class ProxySyncService {
 
     while (addresses.size < this.targetCount && batches < this.maxBatches) {
       const remaining = this.targetCount - addresses.size;
-      const requestedBatches = Math.max(1, Math.ceil(remaining / this.batchSize));
-      const waveSize = Math.min(MAX_PARALLEL_BATCHES, requestedBatches, this.maxBatches - batches);
-      const responses = await Promise.all(
-        Array.from({ length: waveSize }, () => this.fetchBatch(signal)),
-      );
-      batches += waveSize;
-      for (const response of responses) {
-        for (const address of response) {
-          const normalized = address.trim();
-          if (normalized) addresses.add(normalized);
-          if (addresses.size >= this.targetCount) break;
-        }
+      const response = await this.fetchBatch(signal, Math.min(remaining, this.batchSize));
+      batches += 1;
+      for (const address of response) {
+        const normalized = address.trim();
+        if (normalized) addresses.add(normalized);
         if (addresses.size >= this.targetCount) break;
       }
     }
@@ -238,10 +230,12 @@ export class ProxySyncService {
     return { addresses: [...addresses].slice(0, this.targetCount), batches };
   }
 
-  private async fetchBatch(signal: AbortSignal): Promise<string[]> {
+  private async fetchBatch(signal: AbortSignal, requestedCount: number): Promise<string[]> {
     let response: Response | undefined;
+    const url = new URL(this.sourceUrl);
+    url.searchParams.set("count", String(requestedCount));
     for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt += 1) {
-      response = await this.fetchImpl(this.sourceUrl, {
+      response = await this.fetchImpl(url, {
         headers: { Accept: "application/json" },
         signal,
       });
