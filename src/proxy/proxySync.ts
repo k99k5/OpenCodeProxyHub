@@ -15,10 +15,14 @@ const DEFAULT_BATCH_SIZE = 20;
 // SCDN returns at most 20 proxies per request. Allow twice the minimum number
 // of batches so a sync can still reach the target when batches overlap.
 const DEFAULT_MAX_BATCHES = 100;
-// The 100-batch budget can require 20 sequential waves. Keep the same
-// per-wave allowance as the former 10-batch / 30-second defaults.
+// Leave enough time for 100 sequential batches and transient-provider retries.
 const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-const MAX_PARALLEL_BATCHES = 5;
+// The provider rejects bursts from the same client with its non-standard 456
+// status, so batches must be issued sequentially.
+const MAX_PARALLEL_BATCHES = 1;
+const MAX_BATCH_ATTEMPTS = 4;
+const RETRYABLE_HTTP_STATUSES = new Set([429, 456]);
+const DEFAULT_RETRY_DELAY_MS = 1000;
 
 export interface ProxySyncRunResult extends ProxySourceSyncResult {
   batches: number;
@@ -235,11 +239,22 @@ export class ProxySyncService {
   }
 
   private async fetchBatch(signal: AbortSignal): Promise<string[]> {
-    const response = await this.fetchImpl(this.sourceUrl, {
-      headers: { Accept: "application/json" },
-      signal,
-    });
-    if (!response.ok) throw new Error(`Proxy provider returned HTTP ${response.status}`);
+    let response: Response | undefined;
+    for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt += 1) {
+      response = await this.fetchImpl(this.sourceUrl, {
+        headers: { Accept: "application/json" },
+        signal,
+      });
+      if (response.ok) break;
+
+      const retryable = RETRYABLE_HTTP_STATUSES.has(response.status) || response.status >= 500;
+      if (!retryable || attempt === MAX_BATCH_ATTEMPTS) {
+        throw new Error(`Proxy provider returned HTTP ${response.status}`);
+      }
+      await this.waitForRetry(response, attempt, signal);
+    }
+
+    if (!response?.ok) throw new Error("Proxy provider request failed");
 
     const payload: unknown = await response.json();
     if (!payload || typeof payload !== "object") throw new Error("Proxy provider returned an invalid response");
@@ -252,6 +267,27 @@ export class ProxySyncService {
     const proxies = (record.data as Record<string, unknown>).proxies;
     if (!Array.isArray(proxies)) throw new Error("Proxy provider response is missing proxies");
     return proxies.filter((item): item is string => typeof item === "string");
+  }
+
+  private async waitForRetry(response: Response, attempt: number, signal: AbortSignal): Promise<void> {
+    const retryAfter = response.headers.get("Retry-After");
+    const retryAfterSeconds = retryAfter === null ? Number.NaN : Number(retryAfter);
+    const delayMs = Number.isFinite(retryAfterSeconds)
+      ? Math.max(0, retryAfterSeconds * 1000)
+      : DEFAULT_RETRY_DELAY_MS * (2 ** (attempt - 1));
+
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      }, delayMs);
+      if (signal.aborted) return abort();
+      signal.addEventListener("abort", abort, { once: true });
+    });
   }
 
   private intervalMs(): number {
