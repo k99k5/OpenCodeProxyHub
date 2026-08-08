@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
 import { DEFAULT_PROXY_CONNECTIVITY_CHECK_URL, ProxyPoolStore, type ProxyNode } from "../src/proxy/proxyPool.js";
-import { ProxySyncService, SCDN_PROXY_SOURCE } from "../src/proxy/proxySync.js";
+import {
+  ProxySyncService,
+  SCDN_PROXY_API_URL,
+  SCDN_PROXY_SOURCE,
+} from "../src/proxy/proxySync.js";
 import { SettingsStore } from "../src/settings/settingsStore.js";
 
 const tempDirs: string[] = [];
@@ -337,9 +341,9 @@ describe("ProxySyncService", () => {
       const batch = calls;
       calls += 1;
       const proxies = Array.from({ length: 20 }, (_, index) => `10.${batch}.${index}.1:8080`);
-      return new Response(JSON.stringify({ code: 200, message: "success", data: { proxies, count: 20 } }), {
+      return new Response(proxies.join("\n"), {
         status: 200,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/plain" },
       });
     };
     const service = new ProxySyncService(pool, settings, {
@@ -360,6 +364,87 @@ describe("ProxySyncService", () => {
     assert.equal(pool.list().filter((node) => node.source === SCDN_PROXY_SOURCE).length, 100);
   });
 
+  test("requests the text endpoint with its supported query parameters and media type", async () => {
+    const { pool, settings } = createPool(async () => undefined);
+    let requestedUrl: URL | undefined;
+    let accept: string | null = null;
+    const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+      requestedUrl = new URL(input instanceof Request ? input.url : input.toString());
+      accept = new Headers(init?.headers).get("Accept");
+      return new Response("192.0.2.1:8080", { status: 200 });
+    };
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 1,
+      batchSize: 7,
+      maxBatches: 1,
+    });
+
+    await service.syncNow();
+
+    assert.equal(service.getStatus().sourceUrl, SCDN_PROXY_API_URL);
+    assert.equal(requestedUrl?.origin + requestedUrl?.pathname, "https://proxy.scdn.io/text.php");
+    assert.equal(requestedUrl?.searchParams.get("protocol"), "http");
+    assert.equal(requestedUrl?.searchParams.get("count"), "7");
+    assert.equal(accept, "text/plain");
+  });
+
+  test("parses CRLF text while trimming lines and ignoring blank lines", async () => {
+    const { pool, settings } = createPool(async () => undefined);
+    const fetchImpl = async () => new Response(
+      " 192.0.2.1:8080 \r\n\r\n\t192.0.2.2:8080\t\r\n   ",
+      { status: 200, headers: { "Content-Type": "text/plain" } },
+    );
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 2,
+      batchSize: 2,
+      maxBatches: 1,
+    });
+
+    const result = await service.syncNow();
+
+    assert.equal(result.received, 2);
+    assert.deepEqual(
+      pool.list().filter((node) => node.source === SCDN_PROXY_SOURCE).map((node) => node.url).sort(),
+      ["http://192.0.2.1:8080", "http://192.0.2.2:8080"],
+    );
+  });
+
+  test("reports an empty successful text response as the final provider error", async () => {
+    const { pool, settings } = createPool(async () => undefined);
+    const fetchImpl = async () => new Response(" \r\n\t\n", { status: 200 });
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 1,
+      maxBatches: 1,
+    });
+
+    await assert.rejects(() => service.syncNow(), /Proxy provider returned an empty text response/);
+    assert.equal(service.getStatus().lastError, "Proxy provider returned an empty text response");
+  });
+
+  test("retries a network failure before parsing a successful text response", async () => {
+    const { pool, settings } = createPool(async () => undefined);
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError("temporary network failure");
+      return new Response("192.0.2.10:8080", { status: 200 });
+    };
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 1,
+      maxBatches: 1,
+    });
+
+    const result = await service.syncNow();
+
+    assert.equal(calls, 2);
+    assert.equal(result.received, 1);
+    assert.equal(service.getStatus().lastError, null);
+  });
+
   test("requests full bounded batches until the target is reached", async () => {
     const { pool, settings } = createPool(async () => undefined);
     const requestedCounts: number[] = [];
@@ -372,9 +457,9 @@ describe("ProxySyncService", () => {
         { length: count },
         () => `192.0.2.${nextAddress++}:8080`,
       );
-      return new Response(JSON.stringify({ code: 200, message: "success", data: { proxies, count } }), {
+      return new Response(proxies.join("\n"), {
         status: 200,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/plain" },
       });
     };
     const service = new ProxySyncService(pool, settings, {
@@ -401,9 +486,9 @@ describe("ProxySyncService", () => {
       call += 1;
       const start = call === 1 ? 1 : call === 2 ? 21 : 36;
       const proxies = Array.from({ length: 20 }, (_, index) => `192.0.2.${start + index}:8080`);
-      return new Response(JSON.stringify({ code: 200, message: "success", data: { proxies, count: 20 } }), {
+      return new Response(proxies.join("\n"), {
         status: 200,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/plain" },
       });
     };
     const service = new ProxySyncService(pool, settings, {
@@ -424,10 +509,10 @@ describe("ProxySyncService", () => {
     const { pool, settings } = createPool(async () => undefined);
     pool.syncSource(SCDN_PROXY_SOURCE, ["192.0.2.1:8080"]);
     const repeated = Array.from({ length: 20 }, (_, index) => `198.51.100.${index + 1}:8080`);
-    const fetchImpl = async () => new Response(
-      JSON.stringify({ code: 200, message: "success", data: { proxies: repeated, count: 20 } }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    const fetchImpl = async () => new Response(repeated.join("\n"), {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
     const service = new ProxySyncService(pool, settings, {
       fetchImpl: fetchImpl as typeof fetch,
       targetCount: 25,
@@ -448,10 +533,10 @@ describe("ProxySyncService", () => {
     const fetchImpl = async () => {
       calls += 1;
       if (calls === 1) return new Response(null, { status: 456, headers: { "Retry-After": "0" } });
-      return new Response(
-        JSON.stringify({ code: 200, message: "success", data: { proxies: ["192.0.2.10:8080"], count: 1 } }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
+      return new Response("192.0.2.10:8080", {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      });
     };
     const service = new ProxySyncService(pool, settings, {
       fetchImpl: fetchImpl as typeof fetch,
@@ -504,22 +589,12 @@ describe("ProxySyncService", () => {
     assert.ok(disabled);
     pool.update(disabled.id, { enabled: false });
 
-    const fetchImpl = async () => new Response(
-      JSON.stringify({
-        code: 200,
-        message: "success",
-        data: {
-          proxies: [
-            "10.0.0.1:8080",
-            "10.0.0.2:8080",
-            "10.0.0.3:8080",
-            "10.0.0.4:8080",
-          ],
-          count: 4,
-        },
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    const fetchImpl = async () => new Response([
+      "10.0.0.1:8080",
+      "10.0.0.2:8080",
+      "10.0.0.3:8080",
+      "10.0.0.4:8080",
+    ].join("\n"), { status: 200, headers: { "Content-Type": "text/plain" } });
     const service = new ProxySyncService(pool, settings, {
       fetchImpl: fetchImpl as typeof fetch,
       targetCount: 4,
