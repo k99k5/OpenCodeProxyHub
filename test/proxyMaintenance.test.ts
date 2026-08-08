@@ -360,7 +360,7 @@ describe("ProxySyncService", () => {
     assert.equal(pool.list().filter((node) => node.source === SCDN_PROXY_SOURCE).length, 100);
   });
 
-  test("requests the target from the provider in bounded batches", async () => {
+  test("requests full bounded batches until the target is reached", async () => {
     const { pool, settings } = createPool(async () => undefined);
     const requestedCounts: number[] = [];
     let nextAddress = 1;
@@ -386,7 +386,36 @@ describe("ProxySyncService", () => {
 
     const result = await service.syncNow();
 
-    assert.deepEqual(requestedCounts, [20, 20, 5]);
+    assert.deepEqual(requestedCounts, [20, 20, 20]);
+    assert.equal(result.batches, 3);
+    assert.equal(result.received, 45);
+  });
+
+  test("keeps enough final-batch capacity to replace duplicate addresses", async () => {
+    const { pool, settings } = createPool(async () => undefined);
+    const requestedCounts: number[] = [];
+    let call = 0;
+    const fetchImpl = async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      requestedCounts.push(Number(url.searchParams.get("count")));
+      call += 1;
+      const start = call === 1 ? 1 : call === 2 ? 21 : 36;
+      const proxies = Array.from({ length: 20 }, (_, index) => `192.0.2.${start + index}:8080`);
+      return new Response(JSON.stringify({ code: 200, message: "success", data: { proxies, count: 20 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 45,
+      batchSize: 20,
+      maxBatches: 3,
+    });
+
+    const result = await service.syncNow();
+
+    assert.deepEqual(requestedCounts, [20, 20, 20]);
     assert.equal(result.batches, 3);
     assert.equal(result.received, 45);
   });
