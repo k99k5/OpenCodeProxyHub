@@ -15,7 +15,9 @@ const DEFAULT_BATCH_SIZE = 20;
 // SCDN returns at most 20 proxies per request. Allow twice the minimum number
 // of batches so a sync can still reach the target when batches overlap.
 const DEFAULT_MAX_BATCHES = 100;
-const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+// The 100-batch budget can require 20 sequential waves. Keep the same
+// per-wave allowance as the former 10-batch / 30-second defaults.
+const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_PARALLEL_BATCHES = 5;
 
 export interface ProxySyncRunResult extends ProxySourceSyncResult {
@@ -28,6 +30,7 @@ export interface ProxySyncStatus {
   intervalMinutes: number;
   running: boolean;
   targetCount: number;
+  requestTimeoutMs: number;
   sourceUrl: string;
   nextRunAt: string | null;
   lastStartedAt: string | null;
@@ -121,6 +124,7 @@ export class ProxySyncService {
       intervalMinutes: settings.proxyAutoSyncIntervalMinutes,
       running: Boolean(this.activeRun),
       targetCount: this.targetCount,
+      requestTimeoutMs: this.requestTimeoutMs,
       sourceUrl: this.sourceUrl,
       nextRunAt: this.nextRunAt,
       lastStartedAt: this.lastStartedAt,
