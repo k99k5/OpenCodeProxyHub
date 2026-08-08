@@ -204,7 +204,10 @@ export const registerAdminRoutes = async (
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to sync proxies";
       audit(request, "proxy.sync", "failure", { error: message });
-      return reply.code(502).send({ error: { message } });
+      // Use Failed Dependency rather than Bad Gateway here. Some reverse proxies
+      // (notably Cloudflare) replace 502 response bodies, which hides the provider
+      // error that the admin console needs to display.
+      return reply.code(424).send({ error: { message } });
     }
   });
 
