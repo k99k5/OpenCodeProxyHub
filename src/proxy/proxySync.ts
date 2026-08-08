@@ -212,8 +212,10 @@ export class ProxySyncService {
     let batches = 0;
 
     while (addresses.size < this.targetCount && batches < this.maxBatches) {
-      const remaining = this.targetCount - addresses.size;
-      const response = await this.fetchBatch(signal, Math.min(remaining, this.batchSize));
+      // Always use the configured batch capacity. Provider batches can overlap,
+      // so asking only for the number still missing leaves no room to replace
+      // duplicates in the final request.
+      const response = await this.fetchBatch(signal, this.batchSize);
       batches += 1;
       for (const address of response) {
         const normalized = address.trim();
