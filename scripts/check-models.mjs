@@ -12,7 +12,9 @@ const MODELS = [
   "nemotron-3-ultra-free",
   "mimo-v2.5-free",
   "north-mini-code-free",
-  "hy3-free",
+  "laguna-s-2.1-free",
+  "ling-3.0-flash-free",
+  "longcat-2.0-free",
 ];
 
 const ocId = (prefix) => {

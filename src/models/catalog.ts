@@ -8,6 +8,7 @@ export const DEFAULT_MODELS = [
   "north-mini-code-free",
   "laguna-s-2.1-free",
   "ling-3.0-flash-free",
+  "longcat-2.0-free",
 ] as const;
 
 /**

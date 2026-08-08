@@ -36,6 +36,9 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 | `north-mini-code-free` | Cohere North Mini Code 免费模型 |
 | `laguna-s-2.1-free` | Laguna S 2.1 免费模型 |
 | `ling-3.0-flash-free` | Ling 3.0 Flash 免费模型 |
+| `longcat-2.0-free` | LongCat 2.0 免费模型 |
+
+> **上下文说明**：`deepseek-v4-flash-free` 实测支持约 **1M token** 上下文（models.dev 标注的 200K 仅为推荐值，Zen 服务端未按其硬截断），适合长上下文/长文档任务。
 
 新部署会自动生成以上默认模型；已有部署升级后，缺失的默认免费模型会自动追加到已有 `models.json`，不会覆盖用户已修改的模型配置。已下线的模型（如 `nemotron-3-super-free`、`minimax-m3-free`）会在升级时自动禁用并标记下线原因，用户无需手动清理。
 
@@ -447,6 +450,7 @@ OpenCodeProxyHub 独立维护，与 OpenCode、`opencode-free-proxy` 及任何�
 
 ## 更新记录
 
+- **v0.1.5**：新增 `longcat-2.0-free` 默认免费模型；已有部署升级后自动追加，无需改 `models.json`（已实测上游可用，端到端验证通过）
 - **v0.1.4**：移除已下线的 `hy3-free`，新增 `laguna-s-2.1-free` 与 `ling-3.0-flash-free`；升级时自动禁用退役模型，新模型自动追加
 - **v0.1.3**：新增 `hy3-free` 默认免费模型；已有部署升级后自动追加，无需改 `models.json`
 - **v0.1.1**：新增 Nemotron 3 Ultra 默认模型、运行时代理模式
