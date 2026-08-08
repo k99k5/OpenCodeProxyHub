@@ -322,6 +322,13 @@ describe("ProxyPoolStore maintenance", () => {
 });
 
 describe("ProxySyncService", () => {
+  test("defaults to maintaining 1000 proxies", () => {
+    const { pool, settings } = createPool(async () => undefined);
+    const service = new ProxySyncService(pool, settings);
+
+    assert.equal(service.getStatus().targetCount, 1000);
+  });
+
   test("fetches five 20-item batches and synchronizes 100 unique proxies", async () => {
     const { pool, settings } = createPool(async () => undefined);
     let calls = 0;

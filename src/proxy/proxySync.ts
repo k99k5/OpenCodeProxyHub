@@ -9,10 +9,12 @@ import type { SettingsStore } from "../settings/settingsStore.js";
 
 export const SCDN_PROXY_SOURCE = "scdn-http";
 export const SCDN_PROXY_API_URL = "https://proxy.scdn.io/api/get_proxy.php?protocol=http&count=20";
-export const PROXY_SYNC_TARGET_COUNT = 100;
+export const PROXY_SYNC_TARGET_COUNT = 1000;
 
 const DEFAULT_BATCH_SIZE = 20;
-const DEFAULT_MAX_BATCHES = 10;
+// SCDN returns at most 20 proxies per request. Allow twice the minimum number
+// of batches so a sync can still reach the target when batches overlap.
+const DEFAULT_MAX_BATCHES = 100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 const MAX_PARALLEL_BATCHES = 5;
 
