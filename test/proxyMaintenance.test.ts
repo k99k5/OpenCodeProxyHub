@@ -360,6 +360,37 @@ describe("ProxySyncService", () => {
     assert.equal(pool.list().filter((node) => node.source === SCDN_PROXY_SOURCE).length, 100);
   });
 
+  test("requests the target from the provider in bounded batches", async () => {
+    const { pool, settings } = createPool(async () => undefined);
+    const requestedCounts: number[] = [];
+    let nextAddress = 1;
+    const fetchImpl = async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      const count = Number(url.searchParams.get("count"));
+      requestedCounts.push(count);
+      const proxies = Array.from(
+        { length: count },
+        () => `192.0.2.${nextAddress++}:8080`,
+      );
+      return new Response(JSON.stringify({ code: 200, message: "success", data: { proxies, count } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 45,
+      batchSize: 20,
+      maxBatches: 3,
+    });
+
+    const result = await service.syncNow();
+
+    assert.deepEqual(requestedCounts, [20, 20, 5]);
+    assert.equal(result.batches, 3);
+    assert.equal(result.received, 45);
+  });
+
   test("does not replace the current source set when unique addresses are insufficient", async () => {
     const { pool, settings } = createPool(async () => undefined);
     pool.syncSource(SCDN_PROXY_SOURCE, ["192.0.2.1:8080"]);
