@@ -382,6 +382,30 @@ describe("ProxySyncService", () => {
     );
   });
 
+  test("retries the provider's transient HTTP 456 response", async () => {
+    const { pool, settings } = createPool(async () => undefined);
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      if (calls === 1) return new Response(null, { status: 456, headers: { "Retry-After": "0" } });
+      return new Response(
+        JSON.stringify({ code: 200, message: "success", data: { proxies: ["192.0.2.10:8080"], count: 1 } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+    const service = new ProxySyncService(pool, settings, {
+      fetchImpl: fetchImpl as typeof fetch,
+      targetCount: 1,
+      batchSize: 1,
+      maxBatches: 1,
+    });
+
+    const result = await service.syncNow();
+
+    assert.equal(calls, 2);
+    assert.equal(result.received, 1);
+  });
+
   test("queues enabled provider and user-imported nodes after sync and directly deletes disabled nodes", async () => {
     let activeChecks = 0;
     let maxActiveChecks = 0;
