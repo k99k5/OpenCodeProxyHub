@@ -119,6 +119,7 @@ export interface ProxySyncStatus {
   intervalMinutes: number;
   running: boolean;
   targetCount: number;
+  requestTimeoutMs: number;
   sourceUrl: string;
   nextRunAt: string | null;
   lastStartedAt: string | null;
