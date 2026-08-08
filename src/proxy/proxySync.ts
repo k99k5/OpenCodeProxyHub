@@ -8,7 +8,7 @@ import {
 import type { SettingsStore } from "../settings/settingsStore.js";
 
 export const SCDN_PROXY_SOURCE = "scdn-http";
-export const SCDN_PROXY_API_URL = "https://proxy.scdn.io/api/get_proxy.php?protocol=http&count=20";
+export const SCDN_PROXY_API_URL = "https://proxy.scdn.io/text.php";
 export const PROXY_SYNC_TARGET_COUNT = 1000;
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -235,12 +235,19 @@ export class ProxySyncService {
   private async fetchBatch(signal: AbortSignal, requestedCount: number): Promise<string[]> {
     let response: Response | undefined;
     const url = new URL(this.sourceUrl);
+    url.searchParams.set("protocol", "http");
     url.searchParams.set("count", String(requestedCount));
     for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt += 1) {
-      response = await this.fetchImpl(url, {
-        headers: { Accept: "application/json" },
-        signal,
-      });
+      try {
+        response = await this.fetchImpl(url, {
+          headers: { Accept: "text/plain" },
+          signal,
+        });
+      } catch (error) {
+        if (signal.aborted || attempt === MAX_BATCH_ATTEMPTS) throw error;
+        await this.waitForRetry(undefined, attempt, signal);
+        continue;
+      }
       if (response.ok) break;
 
       const retryable = RETRYABLE_HTTP_STATUSES.has(response.status) || response.status >= 500;
@@ -252,21 +259,16 @@ export class ProxySyncService {
 
     if (!response?.ok) throw new Error("Proxy provider request failed");
 
-    const payload: unknown = await response.json();
-    if (!payload || typeof payload !== "object") throw new Error("Proxy provider returned an invalid response");
-    const record = payload as Record<string, unknown>;
-    if (Number(record.code) !== 200) {
-      const message = typeof record.message === "string" ? record.message : "unknown provider error";
-      throw new Error(`Proxy provider error: ${message}`);
-    }
-    if (!record.data || typeof record.data !== "object") throw new Error("Proxy provider response is missing data");
-    const proxies = (record.data as Record<string, unknown>).proxies;
-    if (!Array.isArray(proxies)) throw new Error("Proxy provider response is missing proxies");
-    return proxies.filter((item): item is string => typeof item === "string");
+    const proxies = (await response.text())
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (proxies.length === 0) throw new Error("Proxy provider returned an empty text response");
+    return proxies;
   }
 
-  private async waitForRetry(response: Response, attempt: number, signal: AbortSignal): Promise<void> {
-    const retryAfter = response.headers.get("Retry-After");
+  private async waitForRetry(response: Response | undefined, attempt: number, signal: AbortSignal): Promise<void> {
+    const retryAfter = response?.headers.get("Retry-After") ?? null;
     const retryAfterSeconds = retryAfter === null ? Number.NaN : Number(retryAfter);
     const delayMs = Number.isFinite(retryAfterSeconds)
       ? Math.max(0, retryAfterSeconds * 1000)
